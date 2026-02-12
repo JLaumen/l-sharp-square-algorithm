@@ -12,7 +12,7 @@ from Apartness import Apartness
 from MooreNode import MooreNode
 
 test_cases_path = "Benchmarking/incomplete_dfa_benchmark/test_cases/"
-logging.basicConfig(level=logging.INFO, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(level=logging.DEBUG, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 
 
 class ObservationTreeSquare:
@@ -398,8 +398,8 @@ class ObservationTreeSquare:
         """
         Extend the frontier self.size - len(self.guaranteed_basis) steps from the guaranteed basis
         """
-        length = self.size - len(self.guaranteed_basis) + 3
-        # length = 2
+        # length = self.size - len(self.guaranteed_basis) + 3
+        length = 2
         # Loop over words of length 'length'
         for word in itertools.product(self.alphabet, repeat=length):
             for node in self.guaranteed_basis:

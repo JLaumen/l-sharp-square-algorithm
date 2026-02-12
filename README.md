@@ -1,29 +1,25 @@
 # l-sharp-square-algorithm
 Python (AALpy) implementation of the LSharpSquare algorithm for the active learning of minimal separating automata by Jasper Laumen, Leonne Snel, and Frits Vaandrager.
 
-# Usage
-1. Install the required dependencies:
+# RERS benchmarks
+1. We use the Docker container from the author of the benchmarks: https://github.com/bThink-BGU/Papers-2025-MODELS-Automata-Bug-Description
    ```bash
-   pip install -r requirements.txt
+   docker run --rm -it tomyaacov/automata-bug-description-docker
    ```
-2. Run the main script:
+2. Clone our repository:
    ```bash
-   python run_benchmark.py -b "oliveira" [-t <timeout>] [-c] [-r]
-    ```
-    - `-b ""`: Specify the benchmark type, currently only "oliveira".
-    - `-t <timeout>`: (Optional) Set a timeout value for the benchmark in seconds.
-    - `-c`: (Optional) Use compatibility instead of apartness.
-    - `-r`: (Optional) Use basis replacement.
-    - `-j <threads>`: (Optional) The number of CPU threads to use.
-   
-   For example, to run the Oliveira benchmarks with a timeout of 200 seconds on 4 threads with basis replacement, use:
-   ```bash
-   python run_benchmark.py -b "oliveira" -t 200 -j 4 -r
+   git clone https://github.com/JLaumen/l-sharp-square-algorithm.git -b "rers"
    ```
-    Note that the benchmarks will use all available CPU threads by default, so ensure your system can handle the load. The total
-    expected time for the Oliveira benchmarks is approximately 10 CPU hours when using the default timeout of 200
-    seconds, which can be divided by the number of available cores to estimate wall-clock time. In the case of hyperthreading,
-    individual benchmarks might perform a bit worse, so keep this in mind when comparing different runs (make sure to use the same
-    amount of threads for both runs).
-3. View the results:
-    - The results of the Oliveira benchmarks will be saved to `benchmarking/results`.
+3. Move the contents of the repository:
+   ```bash
+   mv -f ./l-sharp-square-algorithm/* ./
+   ```
+4. Install pySMT
+   ```bash
+   pip install pysmt
+   ```
+5. To run a benchmark, use something like:
+   ```bash
+   python main.py -B m164 -T 1
+   ```
+   where "m164" can be replaced with the desired benchmark. The results are printed to the console.
