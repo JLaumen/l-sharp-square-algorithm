@@ -67,6 +67,8 @@ class ObservationTreeSquare:
         """
         Perform an experiment by querying the SUL if necessary and updating the tree.
         """
+        if not inputs:
+            return self.root.output
         outputs, extended = self._get_output_sequence(inputs, query_mode='final')
         self.insert_observation_sequence(inputs, outputs)
         return outputs[-1]
@@ -389,6 +391,12 @@ class ObservationTreeSquare:
             if transition_mapping is not None:
                 hypothesis = self.construct_hypothesis(transition_mapping=transition_mapping,
                                                        output_mapping=output_mapping)
+                for state1 in hypothesis.states:
+                    for a in self.alphabet:
+                        state2 = state1.transitions[a]
+                        state1.transitions[a] = state1
+                        if Apartness.compute_witness_in_tree_and_hypothesis_states(self, self.root, hypothesis.initial_state) is not None:
+                            state1.transitions[a] = state2
                 return hypothesis
             else:
                 self.size += 1
@@ -398,15 +406,36 @@ class ObservationTreeSquare:
         """
         Extend the frontier self.size - len(self.guaranteed_basis) steps from the guaranteed basis
         """
-        # length = self.size - len(self.guaranteed_basis) + 3
-        length = 2
-        # Loop over words of length 'length'
+        length = 1
         for word in itertools.product(self.alphabet, repeat=length):
             for node in self.guaranteed_basis:
                 access = self.get_access_sequence(node)
                 inputs = access + list(word)
                 outputs, _ = self._get_output_sequence(inputs, query_mode="full")
                 self.insert_observation_sequence(inputs, outputs)
+        # length = self.size - len(self.guaranteed_basis) + 3
+        length = 3
+        # Recursively expand from guaranteed basis
+        for basis_node in self.guaranteed_basis:
+            self.expand_frontier_rec(basis_node, length)
+
+    def expand_frontier_rec(self, node, length):
+        if length == 0:
+            return
+        # Get output of current node (and query if not does not exist)
+        access = self.get_access_sequence(node)
+        # Expand successors
+        # print(f"expanding from {access}")
+        for letter in self.alphabet:
+            inputs = access + [letter]
+            # print(f"trying {inputs}")
+            outputs, _ = self._get_output_sequence(inputs, query_mode="full")
+            self.insert_observation_sequence(inputs, outputs)
+            successor = node.get_successor(letter)
+            if successor.output == "unknown" or successor.output == True:
+                # print(f"stopping at {inputs}, length left {length}")
+                continue
+            self.expand_frontier_rec(successor, length - 1)
 
     def update_frontier(self):
         self.update_frontier_to_basis_dict()

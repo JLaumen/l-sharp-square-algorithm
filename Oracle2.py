@@ -83,6 +83,7 @@ class WpMethodEqOracle(Oracle):
         # self.m = 6 if len(alphabet) < 20 else 5
         self.cache = set()
         self.traces = traces
+        self.start = None
 
     def find_cex(self, hypothesis):
         for label, trace in self.traces:
@@ -91,6 +92,21 @@ class WpMethodEqOracle(Oracle):
             label = True if label == "+" else False
             if hypothesis.execute_sequence(hypothesis.initial_state, trace)[-1] != label:
                 return [trace]
+
+        steps = 0
+        if self.start is None:
+            length = 3
+        else:
+            length = self.start
+        while steps < 100_000 and length < 8:
+           cexs, steps = self.test_rec(hypothesis, [], length, 0)
+           length += 1
+           self.start = length - 1
+           print(f"\n{steps}, {length}")
+           if cexs:
+               return cexs
+
+        return cexs
 
         if not hypothesis.characterization_set:
             hypothesis.characterization_set = hypothesis.compute_characterization_set()
@@ -130,9 +146,39 @@ class WpMethodEqOracle(Oracle):
                             self.sul.post()
                             return cexs
                 self.cache.add(seq)
+
+        cex = self.test_rec(hypothesis, [], 8)
+        if cex is not None:
+            cexs.append(cex)
+
         self.sul.post()
         return cexs
 
+    def test_rec(self, hypothesis, seq, length, steps):
+        if length == 3:
+            print(f"{seq[:4]}" + " "*10, end="\r")
+        if length == 0:
+            return [], steps
+        self.reset_hyp_and_sul(hypothesis)
+        out_sul = False
+        for ind, letter in enumerate(seq):
+            out_hyp = hypothesis.step(letter)
+            out_sul = self.sul.step(letter)
+            self.num_steps += 1
+            steps += 1
+
+            if out_hyp != out_sul and out_sul != "unknown":
+                return [seq[: ind + 1]], steps
+
+        if out_sul == "unknown" or out_sul == True:
+            return [], steps
+
+        cexs = []
+
+        for letter in self.alphabet:
+            cex, steps = self.test_rec(hypothesis, seq + [letter], length - 1, steps)
+            cexs += cex
+        return cexs, steps
 
 class RandomWpMethodEqOracle(Oracle):
     """
