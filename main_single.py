@@ -41,7 +41,7 @@ def run(example, t_type):
                                    sul,
                                    oracle,
                                    return_data=True)
-    # print(dfa3)
+    print(dfa3)
     # print(int(time.time() * 1000) / 1000 - start_time)
     print(data)
     exit()

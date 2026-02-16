@@ -1,5 +1,6 @@
 import itertools
 import logging
+import random
 import time
 from collections import deque
 
@@ -406,13 +407,6 @@ class ObservationTreeSquare:
         """
         Extend the frontier self.size - len(self.guaranteed_basis) steps from the guaranteed basis
         """
-        length = 1
-        for word in itertools.product(self.alphabet, repeat=length):
-            for node in self.guaranteed_basis:
-                access = self.get_access_sequence(node)
-                inputs = access + list(word)
-                outputs, _ = self._get_output_sequence(inputs, query_mode="full")
-                self.insert_observation_sequence(inputs, outputs)
         # length = self.size - len(self.guaranteed_basis) + 3
         length = 3
         # Recursively expand from guaranteed basis
