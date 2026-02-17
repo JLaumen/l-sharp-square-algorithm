@@ -17,16 +17,22 @@ class SystemDCSULST_Negative(SUL):
 
     def query(self, word):
         self.pre()
-        self.words.add(word)
+        self.words.add(tuple(word))
+        out = []
         system_out = False
+        if not word:
+            return [system_out]
         for letter in word:
             t_out = self.T.step(letter)
             system_out = self.label_mapper[self.system_sul.step(letter)]
             if not t_out:
+                out.append(False)
                 self.post()
-                return False
+                return out
+            out.append(system_out)
         self.post()
-        return system_out
+        # print(word, out)
+        return out
 
     def pre(self):
         self.system_sul.pre()

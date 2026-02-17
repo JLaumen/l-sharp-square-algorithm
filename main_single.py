@@ -20,7 +20,7 @@ from system_dc_sul_s_t import SystemDCSULST
 from system_dc_sul_s_t_negative import SystemDCSULST_Negative
 from system_dc_sul_s_t_positive import SystemDCSULST_Positive
 from aalpy.learning_algs import run_Lsharp
-from aalpy.oracles import RandomWMethodEqOracle
+from Oracle import RandomWMethodEqOracle
 
 
 # from RandomWordEqOracle import RandomWordEqOracle
@@ -36,16 +36,16 @@ def run(example, t_type):
     alphabet = system_sul.sul.alphabet
     sul = SystemDCSULST(M, system_sul)
     sul_positive = SystemDCSULST_Positive(M, system_sul)
-    oracle_positive = RandomWMethodEqOracle(alphabet=alphabet, sul=sul_positive, walks_per_state=300, walk_len=30)
+    oracle_positive = RandomWMethodEqOracle(alphabet=alphabet, sul=sul_positive, walks_per_state=300, walk_len=30, positive=True)
     sul_negative = SystemDCSULST_Negative(M, system_sul)
-    oracle_negative = RandomWMethodEqOracle(alphabet=alphabet, sul=sul_negative, walks_per_state=300, walk_len=30)
+    oracle_negative = RandomWMethodEqOracle(alphabet=alphabet, sul=sul_negative, walks_per_state=300, walk_len=30, positive=False)
     oracle = WpMethodEqOracle(alphabet, sul, max_number_of_states=6, traces=counter_examples_dict[example][t_type])
     # Learn the positive and negative DFA with L#
     start_time = int(time.time() * 1000) / 1000
-    dfa = run_Lsharp(alphabet=alphabet, sul=sul_positive, eq_oracle=oracle_positive, automaton_type='dfa')
+    dfa = run_Lsharp(alphabet=alphabet, sul=sul_positive, eq_oracle=oracle_positive, automaton_type='dfa', cache_and_non_det_check=False)
     print("Positive DFA:")
     print(dfa)
-    dfa = run_Lsharp(alphabet=alphabet, sul=sul_negative, eq_oracle=oracle_negative, automaton_type='dfa')
+    dfa = run_Lsharp(alphabet=alphabet, sul=sul_negative, eq_oracle=oracle_negative, automaton_type='dfa', cache_and_non_det_check=False)
     print("Negative DFA:")
     print(dfa)
 
