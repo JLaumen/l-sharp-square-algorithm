@@ -15,9 +15,12 @@ from rpni_learner import RPNILearner
 from system_dc_oracle_s_t import SystemDCOracleST
 
 from LSharpSquare import run_lsharp_square
-from Oracle import RandomWMethodEqOracle
 from Oracle2 import WpMethodEqOracle
 from system_dc_sul_s_t import SystemDCSULST
+from system_dc_sul_s_t_negative import SystemDCSULST_Negative
+from system_dc_sul_s_t_positive import SystemDCSULST_Positive
+from aalpy.learning_algs import run_Lsharp
+from aalpy.oracles import RandomWMethodEqOracle
 
 
 # from RandomWordEqOracle import RandomWordEqOracle
@@ -32,14 +35,26 @@ def run(example, t_type):
         RERSSULST(benchmark=example, t_type=t_type, for_T=False, is_prefix_closed=False, is_suffix_closed=False))
     alphabet = system_sul.sul.alphabet
     sul = SystemDCSULST(M, system_sul)
-    oracle = RandomWMethodEqOracle(alphabet, sul, counter_examples_dict[example][t_type], walks_per_state=100000,
-                                   walk_len=30)
+    sul_positive = SystemDCSULST_Positive(M, system_sul)
+    oracle_positive = RandomWMethodEqOracle(alphabet=alphabet, sul=sul_positive, walks_per_state=300, walk_len=30)
+    sul_negative = SystemDCSULST_Negative(M, system_sul)
+    oracle_negative = RandomWMethodEqOracle(alphabet=alphabet, sul=sul_negative, walks_per_state=300, walk_len=30)
     oracle = WpMethodEqOracle(alphabet, sul, max_number_of_states=6, traces=counter_examples_dict[example][t_type])
-
+    # Learn the positive and negative DFA with L#
     start_time = int(time.time() * 1000) / 1000
+    dfa = run_Lsharp(alphabet=alphabet, sul=sul_positive, eq_oracle=oracle_positive, automaton_type='dfa')
+    print("Positive DFA:")
+    print(dfa)
+    dfa = run_Lsharp(alphabet=alphabet, sul=sul_negative, eq_oracle=oracle_negative, automaton_type='dfa')
+    print("Negative DFA:")
+    print(dfa)
+
+    words = sul_positive.words.union(sul_negative.words)
+
     dfa3, data = run_lsharp_square(alphabet,
                                    sul,
                                    oracle,
+                                   words=words,
                                    return_data=True)
     print(dfa3)
     # print(int(time.time() * 1000) / 1000 - start_time)
@@ -51,7 +66,7 @@ def run(example, t_type):
 
 def main_single(benchmark, t_type, method, description_type, early_detection):
     random.seed(0)
-    example = benchmark  # "m183"  # "magento", "threads_example", "coffee", "coffee_new", "api_alice", "api_bob", "peterson", "m183"
+    example = benchmark
 
     _ = run(example, t_type)
     

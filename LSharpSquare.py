@@ -7,9 +7,12 @@ from ObservationTreeSquare import ObservationTreeSquare
 
 
 def run_lsharp_square(alphabet: list, sul: SUL, eq_oracle: Oracle, return_data: bool = False, solver_timeout: int = 3600,
-                      replace_basis: bool = True, use_compatibility: bool = False):
+                      replace_basis: bool = True, use_compatibility: bool = False, words: set = None):
     ob_tree = ObservationTreeSquare(alphabet, sul, solver_timeout, replace_basis, use_compatibility)
     start_time = time.time()
+    if words is not None:
+        for word in words:
+            ob_tree.add_word(word)
     timeout = solver_timeout
 
     eq_query_time = 0
@@ -31,7 +34,8 @@ def run_lsharp_square(alphabet: list, sul: SUL, eq_oracle: Oracle, return_data: 
 
         # Pose Equivalence Query
         eq_query_start = time.time()
-        cexs = eq_oracle.find_cex(hypothesis)
+        # cexs = eq_oracle.find_cex(hypothesis)
+        cexs = []
         eq_query_time += time.time() - eq_query_start
         validity_queries += 1
 

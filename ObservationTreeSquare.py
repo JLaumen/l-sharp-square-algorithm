@@ -43,6 +43,13 @@ class ObservationTreeSquare:
         self.guaranteed_basis = [self.root]
         self.frontier_to_basis_dict = dict()
 
+    def add_word(self, word):
+        """
+        Add a word to the observation tree, by inserting the corresponding input-output sequence.
+        """
+        outputs, _ = self._get_output_sequence(word, query_mode="full")
+        self.insert_observation_sequence(word, outputs)
+
     def insert_observation(self, inputs, output):
         """
         Insert an observation into the tree using a sequence of inputs and the corresponding output.
