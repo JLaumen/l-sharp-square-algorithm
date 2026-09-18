@@ -295,37 +295,31 @@ class ObservationTreeSquare:
 
     def find_hypothesis(self):
         """
-        SAT-based hypothesis construction using:
+        Find a hypothesis using a SAT encoding.
 
-        * Heule-Verwer style state/transition variables
-        * compact exactly-one encodings
-        * basis-aware compact BFS symmetry breaking
-        * Apartness/domain constraints
-        * CaDiCaL 1.5.3
+        Encoding
+        --------
+        x[v][q]:
+            observation-tree node v is mapped to DFA state q.
 
-        State variables:
+        state_bits[v][k]:
+            binary representation of the state of observation node v.
 
-            m[v][q]
+        delta_bits[q][a][k]:
+            k-th bit of delta(q, a).
 
-        meaning observation-tree node v is represented by DFA state q.
+        output_var[q]:
+            DFA state q is accepting.
 
-        Transition variables:
+        The observation-tree state representation is one-hot. This is
+        useful because the Apartness/frontier restrictions can be encoded
+        directly as large SAT clauses.
 
-            e[q][a][r]
+        The transition function is represented in binary, avoiding the
+        O(n^2) transition-target encoding.
 
-        meaning delta(q,a) = r.
-
-        Output variables:
-
-            out[q]
-
-        meaning q is accepting.
-
-        BFS symmetry breaking is applied only to states which are not
-        already fixed by guaranteed_basis.
-
-        This is important because guaranteed_basis may not itself be
-        globally BFS ordered.
+        The SAT solver is run in a separate process so that
+        self.solver_timeout is enforced as a real wall-clock timeout.
         """
 
         import logging
@@ -335,23 +329,33 @@ class ObservationTreeSquare:
 
         from pysat.card import CardEnc, EncType
 
-        logging.debug(
-            f"Trying to build hypothesis of size {self.size}"
-        )
-
+        logging.debug(f"Trying to build hypothesis of size {self.size}")
         logging.debug(
             f"Basis size: {len(self.guaranteed_basis)}, "
             f"Frontier size: {len(self.frontier_to_basis_dict)}"
         )
 
-        start_time = time.time()
+        start_sat_time = time.time()
 
         n_states = self.size
         alphabet_size = len(self.alphabet)
 
+        # ==============================================================
+        # Special case: one-state automaton
+        # ==============================================================
+
         if n_states <= 0:
-            self.smt_time += time.time() - start_time
+            self.smt_time += time.time() - start_sat_time
             return None, None
+
+        # ==============================================================
+        # Number of bits needed to represent DFA states
+        # ==============================================================
+
+        state_bits_count = max(
+            1,
+            math.ceil(math.log2(max(2, n_states)))
+        )
 
         # ==============================================================
         # Flatten observation tree
@@ -370,17 +374,21 @@ class ObservationTreeSquare:
             for i, letter in enumerate(self.alphabet)
         }
 
+        # Relevant observation-tree edges:
+        #
+        #     source --letter--> target
+        #
         edges = []
 
         while queue:
 
             node = queue.popleft()
-
             source_idx = node_index[node]
 
             for letter, successor in node.successors.items():
 
-                # Exactly the same restriction as your original encoding.
+                # Preserve the exact restriction from the original
+                # SMT encoding.
                 if not successor.leads_to_known:
                     continue
 
@@ -389,7 +397,6 @@ class ObservationTreeSquare:
                     target_idx = len(nodes)
 
                     nodes.append(successor)
-
                     node_index[successor] = target_idx
 
                     queue.append(successor)
@@ -410,9 +417,10 @@ class ObservationTreeSquare:
 
         logging.debug(
             f"SAT encoding: "
-            f"{n_nodes} nodes, "
+            f"{n_nodes} observation nodes, "
             f"{n_states} states, "
-            f"{alphabet_size} alphabet symbols"
+            f"{alphabet_size} alphabet symbols, "
+            f"{state_bits_count} state bits"
         )
 
         # ==============================================================
@@ -421,53 +429,78 @@ class ObservationTreeSquare:
 
         next_var = 1
 
-        def new_var():
-            nonlocal next_var
-
-            v = next_var
-            next_var += 1
-
-            return v
-
         # --------------------------------------------------------------
-        # m[v][q]
+        # x[v][q]
         #
-        # Observation node v -> DFA state q
+        # True iff observation-tree node v represents DFA state q.
         # --------------------------------------------------------------
 
-        mapping_var = [
-            [
-                new_var()
-                for _ in range(n_states)
-            ]
+        state_var = [
+            [0 for _ in range(n_states)]
             for _ in range(n_nodes)
         ]
 
+        for v in range(n_nodes):
+
+            for q in range(n_states):
+
+                state_var[v][q] = next_var
+                next_var += 1
+
         # --------------------------------------------------------------
-        # e[q][a][r]
+        # Binary representation of observation-tree states.
         #
-        # delta(q,a) = r
+        # state_bits[v][k] is bit k of state(v).
         # --------------------------------------------------------------
 
-        transition_var = [
+        state_bits = [
+            [0 for _ in range(state_bits_count)]
+            for _ in range(n_nodes)
+        ]
+
+        for v in range(n_nodes):
+
+            for k in range(state_bits_count):
+
+                state_bits[v][k] = next_var
+                next_var += 1
+
+        # --------------------------------------------------------------
+        # Binary transition representation.
+        #
+        # delta_bits[q][a][k] is bit k of delta(q,a).
+        # --------------------------------------------------------------
+
+        delta_bits = [
             [
-                [
-                    new_var()
-                    for _ in range(n_states)
-                ]
+                [0 for _ in range(state_bits_count)]
                 for _ in range(alphabet_size)
             ]
             for _ in range(n_states)
         ]
 
+        for q in range(n_states):
+
+            for a in range(alphabet_size):
+
+                for k in range(state_bits_count):
+
+                    delta_bits[q][a][k] = next_var
+                    next_var += 1
+
         # --------------------------------------------------------------
-        # out[q]
+        # DFA output variables.
         # --------------------------------------------------------------
 
         output_var = [
-            new_var()
+            0
             for _ in range(n_states)
         ]
+
+        for q in range(n_states):
+
+            output_var[q] = next_var
+            next_var += 1
 
         # ==============================================================
         # CNF
@@ -476,162 +509,153 @@ class ObservationTreeSquare:
         clauses = []
 
         # ==============================================================
-        # Exactly-one helper
+        # Exactly-one state per observation-tree node
         # ==============================================================
 
-        #
-        # The 2019 compact SAT encoding points out that the original
-        # pairwise AtMost1 encoding can be replaced by a more compact
-        # cardinality encoding.
-        #
-        # In your previous experiments, however, pairwise encoding has
-        # been very competitive. Therefore we use pairwise for small
-        # domains and a sequential counter for larger ones.
-        #
+        # For small n, pairwise encoding avoids auxiliary variables.
+        # For larger n, use a sequential counter.
 
         PAIRWISE_THRESHOLD = 25
 
-        def add_exactly_one(literals):
-
-            nonlocal next_var
-
-            # At least one.
-            clauses.append(literals)
-
-            if len(literals) <= 1:
-                return
-
-            if len(literals) <= PAIRWISE_THRESHOLD:
-
-                for i in range(len(literals)):
-
-                    for j in range(i + 1, len(literals)):
-
-                        clauses.append(
-                            [
-                                -literals[i],
-                                -literals[j]
-                            ]
-                        )
-
-            else:
-
-                cnf = CardEnc.atmost(
-                    lits=literals,
-                    bound=1,
-                    top_id=next_var - 1,
-                    encoding=EncType.seqcounter
-                )
-
-                clauses.extend(
-                    cnf.clauses
-                )
-
-                next_var = max(
-                    next_var,
-                    cnf.nv + 1
-                )
-
-        # ==============================================================
-        # Every observation-tree node maps to exactly one DFA state
-        # ==============================================================
-
         for v in range(n_nodes):
 
-            add_exactly_one(
-                mapping_var[v]
-            )
-
-        # ==============================================================
-        # Every DFA (state, letter) has exactly one successor
-        # ==============================================================
-
-        for q in range(n_states):
-
-            for a in range(alphabet_size):
-
-                add_exactly_one(
-                    transition_var[q][a]
-                )
-
-        # ==============================================================
-        # Functional simulation
-        # ==============================================================
-
-        #
-        # For:
-        #
-        #     v --a--> u
-        #
-        # if:
-        #
-        #     m[v,q]
-        #
-        # and:
-        #
-        #     e[q,a,r]
-        #
-        # then:
-        #
-        #     m[u,r].
-        #
-        # This is the standard compact functional-simulation constraint:
-        #
-        #     !m[v,q] OR !e[q,a,r] OR m[u,r]
-        #
-
-        for source_idx, target_idx, letter_idx in edges:
-
-            source_mapping = mapping_var[source_idx]
-
-            target_mapping = mapping_var[target_idx]
-
-            transition_row = [
-                transition_var[q][letter_idx]
+            lits = [
+                state_var[v][q]
                 for q in range(n_states)
             ]
 
+            # At least one.
+            clauses.append(lits)
+
+            # At most one.
+            if n_states > 1:
+
+                if n_states <= PAIRWISE_THRESHOLD:
+
+                    for q1 in range(n_states):
+
+                        for q2 in range(q1 + 1, n_states):
+
+                            clauses.append(
+                                [
+                                    -state_var[v][q1],
+                                    -state_var[v][q2]
+                                ]
+                            )
+
+                else:
+
+                    cnf = CardEnc.atmost(
+                        lits=lits,
+                        bound=1,
+                        top_id=next_var - 1,
+                        encoding=EncType.seqcounter
+                    )
+
+                    clauses.extend(cnf.clauses)
+
+                    next_var = max(
+                        next_var,
+                        cnf.nv + 1
+                    )
+
+        # ==============================================================
+        # Channel one-hot state -> binary state
+        # ==============================================================
+
+        # x[v,q] -> binary(state_bits[v]) == q
+        #
+        # Since exactly one x[v,q] is true, this uniquely determines
+        # all state_bits[v].
+
+        for v in range(n_nodes):
+
             for q in range(n_states):
 
-                m_source = source_mapping[q]
+                x = state_var[v][q]
 
-                for r in range(n_states):
+                for k in range(state_bits_count):
 
+                    bit = state_bits[v][k]
+
+                    if (q >> k) & 1:
+
+                        # x -> bit
+                        clauses.append(
+                            [
+                                -x,
+                                bit
+                            ]
+                        )
+
+                    else:
+
+                        # x -> !bit
+                        clauses.append(
+                            [
+                                -x,
+                                -bit
+                            ]
+                        )
+
+        # ==============================================================
+        # Observation-tree transitions
+        # ==============================================================
+
+        # For an edge:
+        #
+        #     v --a--> u
+        #
+        # if v == q then u == delta(q,a).
+        #
+        # For every state bit:
+        #
+        #     x[v,q] -> (state_bits[u][k] == delta_bits[q][a][k])
+        #
+        # This requires two ternary clauses.
+
+        for source_idx, target_idx, letter_idx in edges:
+
+            for q in range(n_states):
+
+                source_literal = state_var[source_idx][q]
+
+                for k in range(state_bits_count):
+
+                    d = delta_bits[q][letter_idx][k]
+                    b = state_bits[target_idx][k]
+
+                    # x AND d -> b
                     clauses.append(
                         [
-                            -m_source,
-                            -transition_row[q][r],
-                            target_mapping[r]
+                            -source_literal,
+                            -d,
+                            b
+                        ]
+                    )
+
+                    # x AND b -> d
+                    clauses.append(
+                        [
+                            -source_literal,
+                            d,
+                            -b
                         ]
                     )
 
         # ==============================================================
-        # Basis states
+        # Basis nodes
         # ==============================================================
 
-        #
-        # Your existing learning algorithm has already fixed the identity
-        # of these states:
-        #
-        #     basis[0] -> state 0
-        #     basis[1] -> state 1
-        #     ...
-        #
+        # Basis node i must be state i.
 
-        for q, basis_node in enumerate(
-            self.guaranteed_basis
-        ):
-
-            if q >= n_states:
-                raise RuntimeError(
-                    "Basis is larger than requested hypothesis."
-                )
+        for i, basis_node in enumerate(self.guaranteed_basis):
 
             v = node_index[basis_node]
 
             clauses.append(
                 [
-                    mapping_var[v][q]
+                    state_var[v][i]
                 ]
             )
 
@@ -644,690 +668,91 @@ class ObservationTreeSquare:
             if not self.is_known(node):
                 continue
 
-            for q in range(n_states):
+            if node.output is True:
 
-                if bool(node.output):
+                # state(v) = q -> output(q)
+                for q in range(n_states):
 
                     clauses.append(
                         [
-                            -mapping_var[v][q],
+                            -state_var[v][q],
                             output_var[q]
                         ]
                     )
 
-                else:
+            elif node.output is False:
+
+                # state(v) = q -> !output(q)
+                for q in range(n_states):
 
                     clauses.append(
                         [
-                            -mapping_var[v][q],
+                            -state_var[v][q],
                             -output_var[q]
                         ]
                     )
 
         # ==============================================================
-        # Apartness
+        # Apartness / frontier constraints
         # ==============================================================
 
+        # This deliberately preserves the redundant information from the
+        # original SMT encoding.
         #
-        # Keep BOTH forms of the Apartness information:
+        # For a frontier node v:
         #
-        # 1. Positive domain clause
+        #   state(v) must be one of
         #
-        #       m[v,c1] OR ... OR m[v,free_1] ...
+        #       compatible basis states
         #
-        # 2. Explicit negative clauses for incompatible basis states.
+        #   or
         #
-        # The second form gives unit propagation; the first gives a useful
-        # redundant long clause.
+        #       any state not yet represented by the guaranteed basis.
         #
+        # Since x[v,q] is one-hot, this becomes one large SAT clause.
 
         basis_size = len(self.guaranteed_basis)
 
-        basis_index = {
-            basis_node: i
-            for i, basis_node in enumerate(
-                self.guaranteed_basis
-            )
-        }
-
-        for node, candidates in (
-            self.frontier_to_basis_dict.items()
-        ):
+        for node, candidates in self.frontier_to_basis_dict.items():
 
             if node not in node_index:
                 continue
 
             v = node_index[node]
 
-            candidate_set = set(candidates)
-
             allowed_literals = []
 
-            # ----------------------------------------------------------
-            # Compatible basis states
-            # ----------------------------------------------------------
-
+            # Compatible basis states.
             for candidate in candidates:
 
-                q = basis_index[candidate]
-
-                allowed_literals.append(
-                    mapping_var[v][q]
+                candidate_idx = self.guaranteed_basis.index(
+                    candidate
                 )
 
-            # ----------------------------------------------------------
-            # All currently unused state IDs
-            # ----------------------------------------------------------
+                allowed_literals.append(
+                    state_var[v][candidate_idx]
+                )
 
-            for q in range(
-                basis_size,
-                n_states
-            ):
+            # States not currently represented by the basis.
+            for q in range(basis_size, n_states):
 
                 allowed_literals.append(
-                    mapping_var[v][q]
+                    state_var[v][q]
                 )
 
             if not allowed_literals:
 
+                # Explicit contradiction.
                 clauses.append([])
 
             else:
 
-                # Your original redundant Apartness clause.
                 clauses.append(
                     allowed_literals
                 )
 
-            # ----------------------------------------------------------
-            # Explicit incompatibility clauses
-            # ----------------------------------------------------------
-
-            for q in range(basis_size):
-
-                if q not in {
-                    basis_index[c]
-                    for c in candidates
-                }:
-
-                    clauses.append(
-                        [
-                            -mapping_var[v][q]
-                        ]
-                    )
-
         # ==============================================================
-        # Compact BFS symmetry breaking
-        # ==============================================================
-
-        #
-        # IMPORTANT:
-        #
-        # The standard published BFS encoding assumes that ALL target DFA
-        # states are numbered according to a BFS traversal from state 0.
-        #
-        # Your basis states are already named by the learning algorithm.
-        #
-        # Therefore we apply the same idea only to the states
-        #
-        #     basis_size, ..., n_states-1.
-        #
-        # These states are the states which remain symmetric after the
-        # guaranteed basis has fixed its own names.
-        #
-        # For every free state q we identify its canonical first
-        # discovery edge:
-        #
-        #     p --a--> q
-        #
-        # where p < q.
-        #
-        # We then force the discovery descriptors of q and q+1 to be
-        # lexicographically increasing.
-        #
-        # This is a compact form of BFS symmetry breaking. The published
-        # tight encoding uses analogous parent/transition/first-symbol
-        # variables and reduces the basic BFS symmetry-breaking encoding
-        # to quadratic-in-M times alphabet size.
-        #
-
-        free_states = range(
-            basis_size,
-            n_states
-        )
-
-        # --------------------------------------------------------------
-        # no_source[q][p]
-        #
-        # True iff no state s <= p has any transition to q.
-        #
-        # q is a free state.
-        # --------------------------------------------------------------
-
-        no_source = {}
-
-        # --------------------------------------------------------------
-        # no_label[p][q][a]
-        #
-        # True iff state p has no transition to q on any symbol < a.
-        #
-        # We store only a >= 1.
-        # --------------------------------------------------------------
-
-        no_label = {}
-
-        # --------------------------------------------------------------
-        # first[q][p][a]
-        #
-        # True iff p --a--> q is the first discovery edge of q.
-        # --------------------------------------------------------------
-
-        first = {}
-
-        for q in free_states:
-
-            # A free state must have an incoming edge from a smaller
-            # numbered state.
-            #
-            # We encode its first-discovery relation.
-
-            no_source[q] = []
-
-            # ==========================================================
-            # no_source
-            # ==========================================================
-
-            for p in range(q):
-
-                ns = new_var()
-
-                no_source[q].append(ns)
-
-                incoming_literals = [
-                    transition_var[p][a][q]
-                    for a in range(alphabet_size)
-                ]
-
-                if p == 0:
-
-                    # ns <-> NOT(any transition 0 -> q)
-
-                    for e in incoming_literals:
-
-                        clauses.append(
-                            [
-                                -ns,
-                                -e
-                            ]
-                        )
-
-                    clauses.append(
-                        incoming_literals + [ns]
-                    )
-
-                else:
-
-                    previous = no_source[q][p - 1]
-
-                    # ns -> previous
-
-                    clauses.append(
-                        [
-                            -ns,
-                            previous
-                        ]
-                    )
-
-                    # ns -> no transition p -> q
-
-                    for e in incoming_literals:
-
-                        clauses.append(
-                            [
-                                -ns,
-                                -e
-                            ]
-                        )
-
-                    # previous AND no transition p->q -> ns
-
-                    clauses.append(
-                        [
-                            -previous
-                        ]
-                        + incoming_literals
-                        + [ns]
-                    )
-
-            # ==========================================================
-            # first variables
-            # ==========================================================
-
-            first[q] = [
-                [
-                    new_var()
-                    for _ in range(alphabet_size)
-                ]
-                for _ in range(q)
-            ]
-
-            # Every free state must have exactly one canonical discovery
-            # edge. At-least-one is enough here because the definition of
-            # "first" makes two different descriptors mutually exclusive.
-            #
-
-            clauses.append(
-                [
-                    first[q][p][a]
-                    for p in range(q)
-                    for a in range(alphabet_size)
-                ]
-            )
-
-            # ==========================================================
-            # no_label
-            # ==========================================================
-
-            for p in range(q):
-
-                no_label[p] = (
-                    no_label.get(p, {})
-                )
-
-                no_label[p][q] = [
-                    None
-                    for _ in range(alphabet_size)
-                ]
-
-                for a in range(1, alphabet_size):
-
-                    nl = new_var()
-
-                    no_label[p][q][a] = nl
-
-                    current = transition_var[p][a - 1][q]
-
-                    if a == 1:
-
-                        # nl <-> !e[p,0,q]
-
-                        clauses.append(
-                            [
-                                -nl,
-                                -current
-                            ]
-                        )
-
-                        clauses.append(
-                            [
-                                current,
-                                nl
-                            ]
-                        )
-
-                    else:
-
-                        previous = no_label[p][q][a - 1]
-
-                        # nl -> previous
-
-                        clauses.append(
-                            [
-                                -nl,
-                                previous
-                            ]
-                        )
-
-                        # nl -> !current
-
-                        clauses.append(
-                            [
-                                -nl,
-                                -current
-                            ]
-                        )
-
-                        # previous AND !current -> nl
-
-                        clauses.append(
-                            [
-                                -previous,
-                                current,
-                                nl
-                            ]
-                        )
-
-            # ==========================================================
-            # Define first[q,p,a]
-            # ==========================================================
-
-            for p in range(q):
-
-                for a in range(alphabet_size):
-
-                    f = first[q][p][a]
-
-                    e = transition_var[p][a][q]
-
-                    # first -> actual transition
-
-                    clauses.append(
-                        [
-                            -f,
-                            e
-                        ]
-                    )
-
-                    # --------------------------------------------------
-                    # No earlier source may reach q.
-                    # --------------------------------------------------
-
-                    if p > 0:
-
-                        clauses.append(
-                            [
-                                -f,
-                                no_source[q][p - 1]
-                            ]
-                        )
-
-                    # --------------------------------------------------
-                    # No earlier alphabet symbol from p may reach q.
-                    # --------------------------------------------------
-
-                    if a > 0:
-
-                        clauses.append(
-                            [
-                                -f,
-                                no_label[p][q][a]
-                            ]
-                        )
-
-                    # --------------------------------------------------
-                    # Reverse implication:
-                    #
-                    # actual transition + no earlier source + no earlier
-                    # symbol -> first.
-                    # --------------------------------------------------
-
-                    clause = [
-                        -e
-                    ]
-
-                    if p > 0:
-
-                        clause.append(
-                            -no_source[q][p - 1]
-                        )
-
-                    if a > 0:
-
-                        clause.append(
-                            -no_label[p][q][a]
-                        )
-
-                    clause.append(f)
-
-                    clauses.append(
-                        clause
-                    )
-
-        # ==============================================================
-        # Order first-discovery descriptors
-        # ==============================================================
-
-        #
-        # Descriptor order is lexicographic on:
-        #
-        #     (parent state, alphabet symbol)
-        #
-        # We construct prefix variables:
-        #
-        #     prefix[q][k]
-        #
-        # meaning:
-        #
-        #     the first-discovery descriptor of q has rank <= k.
-        #
-        # Then:
-        #
-        #     discovery(q) < discovery(q+1)
-        #
-        # is enforced by:
-        #
-        #     first[q+1,k] -> prefix[q][k-1].
-        #
-        # This avoids the O(M^3 L^2) pairwise comparison.
-        #
-
-        for q in range(
-            basis_size,
-            n_states - 1
-        ):
-
-            # q has q*alphabet_size possible descriptors:
-            #
-            #   (0,0), (0,1), ..., (1,0), ..., (q-1,L-1)
-            #
-
-            num_descriptors = q * alphabet_size
-
-            if num_descriptors == 0:
-                continue
-
-            prefix = [
-                new_var()
-                for _ in range(num_descriptors)
-            ]
-
-            for rank in range(num_descriptors):
-
-                p = rank // alphabet_size
-                a = rank % alphabet_size
-
-                current = prefix[rank]
-
-                f = first[q][p][a]
-
-                if rank == 0:
-
-                    # prefix[0] <-> first[q,0,0]
-
-                    clauses.append(
-                        [
-                            -current,
-                            f
-                        ]
-                    )
-
-                    clauses.append(
-                        [
-                            -f,
-                            current
-                        ]
-                    )
-
-                else:
-
-                    previous = prefix[rank - 1]
-
-                    # current -> previous OR f
-
-                    clauses.append(
-                        [
-                            -current,
-                            previous,
-                            f
-                        ]
-                    )
-
-                    # previous -> current
-
-                    clauses.append(
-                        [
-                            -previous,
-                            current
-                        ]
-                    )
-
-                    # f -> current
-
-                    clauses.append(
-                        [
-                            -f,
-                            current
-                        ]
-                    )
-
-            # ----------------------------------------------------------
-            # q+1 must be discovered after q.
-            # ----------------------------------------------------------
-
-            next_state = q + 1
-
-            #
-            # If next_state uses descriptor rank k, q must have a descriptor
-            # of rank < k.
-            #
-
-            for rank in range(
-                min(
-                    num_descriptors,
-                    next_state * alphabet_size
-                )
-            ):
-
-                p = rank // alphabet_size
-                a = rank % alphabet_size
-
-                f_next = first[next_state][p][a]
-
-                if rank == 0:
-
-                    # Nothing is smaller than descriptor 0.
-
-                    clauses.append(
-                        [
-                            -f_next
-                        ]
-                    )
-
-                else:
-
-                    clauses.append(
-                        [
-                            -f_next,
-                            prefix[rank - 1]
-                        ]
-                    )
-
-        # ==============================================================
-        # Additional simple BFS shape constraints
-        # ==============================================================
-
-        #
-        # A DFA state has only |Sigma| outgoing transitions, so in the
-        # BFS tree it can have at most |Sigma| children.
-        #
-        # The first-discovery representation already implies this, but
-        # making it explicit can improve propagation.
-        #
-        # For each parent p, at most alphabet_size free states may have
-        # p as their canonical parent.
-        #
-
-        if alphabet_size > 0:
-
-            for p in range(
-                n_states
-            ):
-
-                children = []
-
-                for q in range(
-                    max(
-                        basis_size,
-                        p + 1
-                    ),
-                    n_states
-                ):
-
-                    if q not in first:
-                        continue
-
-                    children.extend(
-                        first[q][p]
-                    )
-
-                #
-                # The descriptors first[q][p][a] are mutually exclusive
-                # for each q, and at most one such descriptor for p can
-                # correspond to a given alphabet symbol.
-                #
-                # We therefore need to count states discovered from p,
-                # not individual symbols.
-                #
-                # Construct a small child variable for each q.
-                #
-
-                child_vars = []
-
-                for q in range(
-                    max(
-                        basis_size,
-                        p + 1
-                    ),
-                    n_states
-                ):
-
-                    if q not in first:
-                        continue
-
-                    child = new_var()
-
-                    child_vars.append(child)
-
-                    first_from_p = first[q][p]
-
-                    # child <-> OR_a first[q,p,a]
-
-                    for f in first_from_p:
-
-                        clauses.append(
-                            [
-                                -f,
-                                child
-                            ]
-                        )
-
-                    clauses.append(
-                        [
-                            -child
-                        ]
-                        + first_from_p
-                    )
-
-                if child_vars:
-
-                    cnf = CardEnc.atmost(
-                        lits=child_vars,
-                        bound=alphabet_size,
-                        top_id=next_var - 1,
-                        encoding=EncType.seqcounter
-                    )
-
-                    clauses.extend(
-                        cnf.clauses
-                    )
-
-                    next_var = max(
-                        next_var,
-                        cnf.nv + 1
-                    )
-
-        # ==============================================================
-        # Formula statistics
+        # Logging formula size
         # ==============================================================
 
         logging.debug(
@@ -1337,12 +762,20 @@ class ObservationTreeSquare:
         )
 
         # ==============================================================
-        # Solve with CaDiCaL
+        # Run CaDiCaL in a separate process
         # ==============================================================
+
+        #
+        # fork is preferable here on Linux because the CNF does not need
+        # to be serialized and copied through a multiprocessing Queue.
+        #
+        # Your environment is Linux, so this should be available.
+        #
 
         try:
             ctx = mp.get_context("fork")
         except ValueError:
+            # Fallback for platforms where fork is unavailable.
             ctx = mp.get_context()
 
         result_queue = ctx.Queue(
@@ -1365,17 +798,16 @@ class ObservationTreeSquare:
                 self.solver_timeout / 1000.0
             )
 
-            logging.debug(
-                f"Solving with timeout "
-                f"{timeout_seconds:.3f}s..."
-            )
+            # ----------------------------------------------------------
+            # Wait for the SAT process.
+            # ----------------------------------------------------------
 
             process.join(
                 timeout_seconds
             )
 
             # ----------------------------------------------------------
-            # Timeout
+            # Timeout.
             # ----------------------------------------------------------
 
             if process.is_alive():
@@ -1386,38 +818,37 @@ class ObservationTreeSquare:
                 )
 
                 process.terminate()
+
                 process.join()
 
                 self.smt_time += (
-                    time.time() - start_time
+                    time.time() - start_sat_time
                 )
 
                 return None, None
 
             # ----------------------------------------------------------
-            # Get result
+            # Process finished.
             # ----------------------------------------------------------
 
             try:
 
-                status, model = (
-                    result_queue.get_nowait()
-                )
+                status, model = result_queue.get_nowait()
 
             except Exception:
 
                 logging.error(
-                    "SAT process terminated without a result"
+                    "SAT process terminated without returning a result"
                 )
 
                 self.smt_time += (
-                    time.time() - start_time
+                    time.time() - start_sat_time
                 )
 
                 return None, None
 
             # ----------------------------------------------------------
-            # Error
+            # SAT solver error.
             # ----------------------------------------------------------
 
             if status == "error":
@@ -1427,47 +858,49 @@ class ObservationTreeSquare:
                 )
 
                 self.smt_time += (
-                    time.time() - start_time
+                    time.time() - start_sat_time
                 )
 
                 return None, None
 
             # ----------------------------------------------------------
-            # UNSAT
+            # UNSAT.
             # ----------------------------------------------------------
 
             if status == "unsat":
 
                 logging.debug("UNSAT")
-
                 logging.debug(
-                    f"No hypothesis of size "
-                    f"{self.size} exists"
+                    f"No hypothesis of size {self.size} exists"
                 )
 
                 self.smt_time += (
-                    time.time() - start_time
+                    time.time() - start_sat_time
                 )
 
                 return None, None
 
             # ----------------------------------------------------------
-            # SAT
+            # SAT.
             # ----------------------------------------------------------
 
             if status != "sat":
 
                 logging.error(
-                    f"Unexpected SAT status: {status}"
+                    f"Unexpected SAT process status: {status}"
                 )
 
                 self.smt_time += (
-                    time.time() - start_time
+                    time.time() - start_sat_time
                 )
 
                 return None, None
 
             logging.debug("SAT")
+
+            # ==========================================================
+            # Convert model to a set for O(1) lookup.
+            # ==========================================================
 
             model_set = set(model)
 
@@ -1484,38 +917,47 @@ class ObservationTreeSquare:
 
                 for a in range(alphabet_size):
 
-                    chosen = None
+                    value = 0
 
-                    for r in range(n_states):
+                    for k in range(state_bits_count):
 
-                        if (
-                            transition_var[q][a][r]
-                            in model_set
-                        ):
+                        variable = delta_bits[q][a][k]
 
-                            chosen = r
-                            break
+                        if variable in model_set:
 
-                    if chosen is None:
+                            value |= (
+                                1 << k
+                            )
 
-                        raise RuntimeError(
-                            f"No target found for "
-                            f"delta({q},{a})"
-                        )
+                    # If this transition never occurs in the
+                    # observation tree, its binary representation may
+                    # represent a value >= n_states because we did not
+                    # needlessly constrain unused transitions.
+                    #
+                    # Complete such transitions arbitrarily.
+                    if value >= n_states:
 
-                    transition_mapping[q][a] = chosen
+                        value = 0
+
+                    transition_mapping[q][a] = value
 
             # ==========================================================
             # Extract output mapping
             # ==========================================================
 
             output_mapping = [
-                output_var[q] in model_set
-                for q in range(n_states)
+                False
+                for _ in range(n_states)
             ]
 
+            for q in range(n_states):
+
+                output_mapping[q] = (
+                    output_var[q] in model_set
+                )
+
             self.smt_time += (
-                time.time() - start_time
+                time.time() - start_sat_time
             )
 
             return (
@@ -1525,6 +967,7 @@ class ObservationTreeSquare:
 
         finally:
 
+            # Make absolutely sure that the child is gone.
             if process.is_alive():
 
                 process.terminate()
@@ -1643,41 +1086,6 @@ def _solve_cadical_process(clauses, result_queue):
     try:
         solver = Solver(
             name="cadical153",
-            bootstrap_with=clauses
-        )
-
-        result = solver.solve()
-
-        if result:
-            result_queue.put(
-                ("sat", solver.get_model())
-            )
-        else:
-            result_queue.put(
-                ("unsat", None)
-            )
-
-    except Exception as e:
-        result_queue.put(
-            ("error", repr(e))
-        )
-
-    finally:
-        if solver is not None:
-            solver.delete()
-
-def _solve_cadical_process(clauses, result_queue):
-    """
-    Run CaDiCaL in a separate process.
-
-    The parent process uses this to enforce a wall-clock timeout.
-    """
-    from pysat.solvers import Cadical153
-
-    solver = None
-
-    try:
-        solver = Cadical153(
             bootstrap_with=clauses
         )
 
