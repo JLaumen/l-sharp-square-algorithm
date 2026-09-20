@@ -13,8 +13,9 @@ from Apartness import Apartness
 from MooreNode import MooreNode
 
 
-test_cases_path = "Benchmarking/incomplete_dfa_benchmark/test_cases/"
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+
+
+
 logger = logging.getLogger(__name__)
 
 PAIRWISE_THRESHOLD = 25
@@ -35,10 +36,20 @@ class _SatVariableAllocator:
         self.next_var = max(self.next_var, next_var)
 
 
+class _AcyclicObservationNode:
+    """Node in the minimized acyclic observation automaton."""
+
+    __slots__ = ("output", "successors", "members")
+
+    def __init__(self, output, successors=None):
+        self.output = output
+        self.successors = successors or {}
+        self.members = []
+
+
 def _add_exactly_one(clauses, literals, allocator):
     """Add an exactly-one constraint using pairwise or sequential encoding."""
-    literals = list(literals)
-    clauses.append(literals)
+    clauses.append(list(literals))
 
     if len(literals) <= 1:
         return
@@ -60,7 +71,15 @@ def _add_exactly_one(clauses, literals, allocator):
 
 
 class ObservationTreeSquare:
-    def __init__(self, alphabet, sul, solver_timeout, replace_basis, use_compatibility):
+    def __init__(
+        self,
+        alphabet,
+        sul,
+        solver_timeout,
+        replace_basis,
+        use_compatibility,
+        minimize_observation_tree=True,
+    ):
         """
         Initializes the observation tree with a root node.
         """
@@ -68,6 +87,9 @@ class ObservationTreeSquare:
         self.solver_timeout = solver_timeout * 1000
         self.replace_basis = replace_basis
         self.use_compatibility = use_compatibility
+        # Temporarily quotient the relevant observation tree before building
+        # the SAT instance. The original observation tree is never modified.
+        self.minimize_observation_tree = minimize_observation_tree
 
         # Logger information
         self.smt_time = 0
@@ -216,204 +238,54 @@ class ObservationTreeSquare:
         for successor in node.successors.values():
             self.update_frontier_to_basis_dict_dfs(successor)
 
-    def _collect_basis_clique_candidates(self):
-        """Return observation-tree nodes that can participate in the basis clique."""
-        candidates = []
-        seen = set()
-        queue = deque([self.root])
-
-        while queue:
-            node = queue.popleft()
-            if node in seen:
-                continue
-            seen.add(node)
-
-            if node in self.guaranteed_basis or node.leads_to_known:
-                candidates.append(node)
-
-            queue.extend(node.successors.values())
-
-        return candidates
-
-    def _maximum_clique(self, adjacency_masks, required_indices=()):
-        """Find an exact maximum clique using branch-and-bound with greedy coloring."""
-        n_vertices = len(adjacency_masks)
-        if n_vertices == 0:
-            return []
-
-        required_indices = tuple(required_indices)
-
-        # The required vertices must already form a clique.
-        for i, vertex in enumerate(required_indices):
-            for other in required_indices[i + 1:]:
-                if not (adjacency_masks[vertex] & (1 << other)):
-                    raise ValueError("Required basis nodes do not form a clique")
-
-        required_mask = 0
-        for vertex in required_indices:
-            required_mask |= 1 << vertex
-
-        all_vertices = (1 << n_vertices) - 1
-        candidate_mask = all_vertices & ~required_mask
-        for vertex in required_indices:
-            candidate_mask &= adjacency_masks[vertex]
-
-        # We only need to search for additional vertices.  The required
-        # vertices are already fixed in the clique.
-        best = list(required_indices)
-        best_size = len(best)
-
-        def color_sort(vertices):
-            """Color an induced graph greedily and return vertices + bounds."""
-            order = []
-            bounds = []
-            remaining = vertices
-            color = 0
-
-            while remaining:
-                color += 1
-                available = remaining
-
-                while available:
-                    bit = available & -available
-                    vertex = bit.bit_length() - 1
-                    order.append(vertex)
-                    bounds.append(color)
-
-                    available &= ~bit
-                    available &= ~adjacency_masks[vertex]
-                    remaining &= ~bit
-
-            return order, bounds
-
-        def expand(vertices, clique):
-            nonlocal best, best_size
-
-            if not vertices:
-                if len(clique) > best_size:
-                    best = clique.copy()
-                    best_size = len(best)
-                return
-
-            order, bounds = color_sort(vertices)
-
-            for index in range(len(order) - 1, -1, -1):
-                if len(clique) + bounds[index] <= best_size:
-                    return
-
-                vertex = order[index]
-                bit = 1 << vertex
-
-                if not (vertices & bit):
-                    continue
-
-                new_vertices = vertices & adjacency_masks[vertex]
-                clique.append(vertex)
-
-                if not new_vertices:
-                    if len(clique) > best_size:
-                        best = clique.copy()
-                        best_size = len(best)
-                else:
-                    expand(new_vertices, clique)
-
-                clique.pop()
-                vertices &= ~bit
-
-        expand(candidate_mask, list(required_indices))
-        return best
-
-    def _find_maximum_basis_clique(self):
-        """Find the largest compatible-distinct (Apartness) basis clique."""
-        candidates = self._collect_basis_clique_candidates()
-        if not candidates:
-            return [self.root]
-
-        node_index = {node: index for index, node in enumerate(candidates)}
-        adjacency_masks = [0] * len(candidates)
-
-        for left_index, left_node in enumerate(candidates):
-            for right_index in range(left_index):
-                right_node = candidates[right_index]
-                if Apartness.states_are_incompatible(left_node, right_node, self):
-                    adjacency_masks[left_index] |= 1 << right_index
-                    adjacency_masks[right_index] |= 1 << left_index
-
-        if self.replace_basis:
-            # The root must remain state 0, so search for the largest clique
-            # containing it rather than an unrestricted maximum clique.
-            required_nodes = [self.root]
-        else:
-            # Without basis replacement, the current basis is fixed and we
-            # only search for additional pairwise-incompatible nodes.
-            required_nodes = list(self.guaranteed_basis)
-
-        required_indices = []
-        for node in required_nodes:
-            index = node_index.get(node)
-            if index is None:
-                raise RuntimeError("A required basis node is missing from the clique candidate set")
-            required_indices.append(index)
-
-        clique_indices = self._maximum_clique(adjacency_masks, required_indices)
-        clique = [candidates[index] for index in clique_indices]
-
-        # Keep the root first because it is DFA state 0.  Order the remaining
-        # basis states deterministically to keep SAT encodings reproducible.
-        clique.sort(
-            key=lambda node: (
-                node is not self.root,
-                len(self.get_access_sequence(node) or ()),
-                tuple(self.get_access_sequence(node) or ()),
-            )
-        )
-        return clique
-
-    def _rebuild_frontier_to_basis_dict(self):
-        """Recompute all frontier domains after changing the basis clique."""
-        basis = tuple(self.guaranteed_basis)
-        basis_set = set(basis)
-        new_frontier = {}
-        queue = deque([self.root])
-        seen = set()
-
-        while queue:
-            node = queue.popleft()
-            if node in seen:
-                continue
-            seen.add(node)
-            queue.extend(node.successors.values())
-
-            if node in basis_set:
-                continue
-
-            candidates = {
-                basis_node
-                for basis_node in basis
-                if not Apartness.states_are_incompatible(node, basis_node, self)
-            }
-            new_frontier[node] = candidates
-
-        self.frontier_to_basis_dict = new_frontier
-
     def promote_node_to_basis(self):
-        """Replace the greedy maximal-clique step by an exact maximum-clique search."""
-        old_basis = tuple(self.guaranteed_basis)
-        new_basis = self._find_maximum_basis_clique()
+        """
+        If an isolated frontier node is found, reset the queue and restart from the guaranteed basis plus the isolated node.
+        """
+        queue = deque([self.root])
+        while queue:
+            iso_frontier_node = queue.popleft()
+            for successor in iso_frontier_node.successors.values():
+                queue.append(successor)
+            if iso_frontier_node in self.guaranteed_basis:
+                continue
+            basis_list = self.frontier_to_basis_dict[iso_frontier_node]
+            if not basis_list:
+                self.guaranteed_basis.append(iso_frontier_node)
+                # Update the candidates
+                del self.frontier_to_basis_dict[iso_frontier_node]
+                for node, candidates in self.frontier_to_basis_dict.items():
+                    candidates.add(iso_frontier_node)
+                logger.debug(f"Increasing basis size to {len(self.guaranteed_basis)}")
+                self.size = max(self.size, len(self.guaranteed_basis))
+                return True
 
-        if len(new_basis) <= len(old_basis):
+        if not self.replace_basis:
             return False
 
-        self.guaranteed_basis = new_basis
-        self.size = max(self.size, len(new_basis))
-        self._rebuild_frontier_to_basis_dict()
-
-        logger.debug(
-            "Increasing basis size from %d to %d using maximum clique",
-            len(old_basis),
-            len(new_basis),
-        )
-        return True
+        queue = deque([self.root])
+        while queue:
+            iso_frontier_node = queue.popleft()
+            for successor in iso_frontier_node.successors.values():
+                queue.append(successor)
+            if iso_frontier_node in self.guaranteed_basis:
+                continue
+            basis_list = self.frontier_to_basis_dict[iso_frontier_node]
+            if len(basis_list) == 1:
+                candidate = next(iter(self.frontier_to_basis_dict[iso_frontier_node]))
+                if len(self.get_access_sequence(candidate)) <= len(self.get_access_sequence(iso_frontier_node)):
+                    continue
+                self.guaranteed_basis.remove(candidate)
+                self.guaranteed_basis.append(iso_frontier_node)
+                # Update the candidates
+                del self.frontier_to_basis_dict[iso_frontier_node]
+                for node, candidates in self.frontier_to_basis_dict.items():
+                    if candidate in candidates:
+                        candidates.remove(candidate)
+                    candidates.add(iso_frontier_node)
+                self.frontier_to_basis_dict[candidate] = {node for node in self.guaranteed_basis}
+                return True
+        return False
 
     def make_frontiers_identified(self):
         """
@@ -488,59 +360,56 @@ class ObservationTreeSquare:
         return hypothesis
 
     def find_hypothesis(self):
-        """Find a hypothesis using the pure one-hot SAT encoding."""
+        """
+        Find a DFA of the current size by:
+
+        1. Minimizing the relevant observation tree exactly as DFAMiner
+           minimizes an acyclic 3DFA: two states are merged when they have
+           the same three-valued output and the same labelled successor
+           structure.
+        2. Finding a functional simulation (morphism) from that minimized
+           acyclic automaton into the candidate DFA using a small one-hot SAT
+           encoding.
+
+        This minimized mode deliberately does not add Apartness constraints,
+        BFS symmetry breaking, or product/reachability variables. It is the
+        simple baseline requested for validating the minimization itself.
+
+        The original observation tree is never modified.
+        """
         start_time = time.time()
         n_states = self.size
         alphabet_size = len(self.alphabet)
 
-        logger.debug("Trying to build hypothesis of size %d", n_states)
         logger.debug(
-            "Basis size: %d, Frontier size: %d",
-            len(self.guaranteed_basis),
-            len(self.frontier_to_basis_dict),
+            "Trying hypothesis size %d (simple DFAMiner-style minimization)",
+            n_states,
         )
 
         if n_states <= 0:
             self.smt_time += time.time() - start_time
             return None, None
 
-        nodes, node_index, edges = self._flatten_observation_tree()
-        n_nodes = len(nodes)
+        (
+            nodes,
+            _node_index,
+            edges,
+        ) = self._build_dfaminer_minimized_graph()
 
+        n_nodes = len(nodes)
         logger.debug(
-            "SAT encoding: %d nodes, %d relevant edges, %d states, %d alphabet symbols",
+            "Minimized 3DFA: %d states, %d transitions; target DFA: %d states",
             n_nodes,
             len(edges),
-            n_states,
-            alphabet_size,
-        )
-
-        basis_size = len(self.guaranteed_basis)
-        if basis_size > n_states:
-            self.smt_time += time.time() - start_time
-            return None, None
-
-        basis_index = {
-            basis_node: state
-            for state, basis_node in enumerate(self.guaranteed_basis)
-        }
-
-        # Only create morphism variables for states that are still possible
-        # for each observation-tree node. Apartness restrictions therefore
-        # remove variables instead of creating them and later forcing them
-        # false.
-        mapping_domains = self._compute_mapping_domains(
-            nodes,
-            basis_index,
-            basis_size,
             n_states,
         )
 
         allocator = _SatVariableAllocator()
-        mapping_var = [
-            {state: allocator.new() for state in domain}
-            for domain in mapping_domains
-        ]
+        clauses = []
+
+        # ------------------------------------------------------------------
+        # Target DFA transitions: e[q,a,r]
+        # ------------------------------------------------------------------
         transition_var = [
             [
                 [allocator.new() for _ in range(n_states)]
@@ -548,37 +417,68 @@ class ObservationTreeSquare:
             ]
             for _ in range(n_states)
         ]
-        output_var = [allocator.new() for _ in range(n_states)]
-        clauses = []
-
-        for node_mapping in mapping_var:
-            _add_exactly_one(clauses, node_mapping.values(), allocator)
 
         for state in transition_var:
             for literals in state:
                 _add_exactly_one(clauses, literals, allocator)
 
+        # ------------------------------------------------------------------
+        # Target DFA outputs: out[q]
+        # ------------------------------------------------------------------
+        output_var = [allocator.new() for _ in range(n_states)]
+
+        # ------------------------------------------------------------------
+        # Morphism: m[p,q]
+        #
+        # m[p,q] means minimized 3DFA state p is mapped to target DFA state q.
+        # Every minimized state has exactly one target state.
+        # ------------------------------------------------------------------
+        mapping_var = [
+            [allocator.new() for _ in range(n_states)]
+            for _ in range(n_nodes)
+        ]
+
+        for literals in mapping_var:
+            _add_exactly_one(clauses, literals, allocator)
+
+        # The root of the minimized 3DFA is mapped to the initial DFA state 0.
+        clauses.append([mapping_var[0][0]])
+
+        # ------------------------------------------------------------------
+        # Functional simulation.
+        #
+        # For p -a-> p' and every q,r:
+        #     m[p,q] & e[q,a,r] -> m[p',r]
+        # ------------------------------------------------------------------
         self._add_functional_simulation(
-            clauses, edges, mapping_var, transition_var
+            clauses,
+            edges,
+            mapping_var,
+            transition_var,
         )
 
-        self._add_basis_constraints(
-            clauses, mapping_var, node_index, basis_index
-        )
-        self._add_output_constraints(
-            clauses, nodes, mapping_var, output_var
-        )
-        self._add_bfs_symmetry_breaking(
-            clauses,
-            allocator,
-            transition_var,
-            basis_size,
-            n_states,
-            alphabet_size,
-        )
+        # ------------------------------------------------------------------
+        # Three-valued output constraints.
+        # ------------------------------------------------------------------
+        for node_index, node in enumerate(nodes):
+            if not self.is_known(node):
+                continue
+
+            if bool(node.output):
+                for state in range(n_states):
+                    clauses.append([
+                        -mapping_var[node_index][state],
+                        output_var[state],
+                    ])
+            else:
+                for state in range(n_states):
+                    clauses.append([
+                        -mapping_var[node_index][state],
+                        -output_var[state],
+                    ])
 
         logger.debug(
-            "SAT formula: %d variables, %d clauses",
+            "Simple minimized SAT formula: %d variables, %d clauses",
             allocator.next_var - 1,
             len(clauses),
         )
@@ -586,13 +486,10 @@ class ObservationTreeSquare:
         solver = None
         try:
             solver = Cadical153(bootstrap_with=clauses)
-
-            # Direct solve. The process-based timeout helpers below remain
-            # available for future use.
             result = solver.solve()
 
             if result is False:
-                logger.debug("UNSAT at hypothesis size %d", self.size)
+                logger.debug("UNSAT at hypothesis size %d", n_states)
                 self.smt_time += time.time() - start_time
                 return None, None
 
@@ -619,219 +516,171 @@ class ObservationTreeSquare:
             if solver is not None:
                 solver.delete()
 
-    def _flatten_observation_tree(self):
-        """Return the relevant observation-tree nodes and edges."""
+    def _build_dfaminer_minimized_graph(self):
+        """
+        Build the relevant acyclic 3DFA and minimize it exactly in the style
+        of DFAMiner's acyclic minimizer.
+
+        The relevant observation structure is obtained by keeping only nodes
+        that are reachable from the root and can reach a known output. This is
+        the same useful-state reduction performed by DFAMiner before its
+        bottom-up acyclic minimization.
+
+        A state signature consists only of:
+
+            (three-valued output,
+             defined transition label -> minimized successor class)
+
+        No Apartness, basis identity, or SAT-specific information is included
+        in the signature. This is intentional: the goal here is to reproduce
+        the plain DFAMiner-style 3DFA minimization as closely as possible.
+        """
+        alphabet_index = {
+            letter: index
+            for index, letter in enumerate(self.alphabet)
+        }
+
+        # --------------------------------------------------------------
+        # Build the useful part of the observation tree.
+        # --------------------------------------------------------------
         queue = deque([self.root])
-        nodes = [self.root]
-        node_index = {self.root: 0}
-        alphabet_index = {letter: i for i, letter in enumerate(self.alphabet)}
-        edges = []
+        original_nodes = [self.root]
+        seen = {self.root}
 
         while queue:
             node = queue.popleft()
-            source_idx = node_index[node]
-
-            for letter, successor in node.successors.items():
-                # Preserve the restriction from the original encoding.
+            for successor in node.successors.values():
                 if not successor.leads_to_known:
                     continue
+                if successor in seen:
+                    continue
+                seen.add(successor)
+                original_nodes.append(successor)
+                queue.append(successor)
 
-                if successor not in node_index:
-                    node_index[successor] = len(nodes)
-                    nodes.append(successor)
-                    queue.append(successor)
+        # --------------------------------------------------------------
+        # DFAMiner-style bottom-up minimization.
+        #
+        # For an acyclic deterministic automaton, process leaves first.
+        # A state is identified by its three-valued output and the classes
+        # reached by each of its defined transitions.
+        # --------------------------------------------------------------
+        representative = {}
+        signature_to_class = {}
+        minimized_nodes = []
 
-                edges.append(
-                    (
-                        source_idx,
-                        node_index[successor],
-                        alphabet_index[letter],
-                    )
+        def output_type(node):
+            if node.output is True:
+                return "accept"
+            if node.output is False:
+                return "reject"
+            return "dontcare"
+
+        for node in reversed(original_nodes):
+            successor_signature = tuple(
+                (
+                    alphabet_index[letter],
+                    representative[successor],
+                )
+                for letter, successor in sorted(
+                    node.successors.items(),
+                    key=lambda item: alphabet_index[item[0]],
+                )
+                if successor.leads_to_known
+            )
+
+            signature = (
+                output_type(node),
+                successor_signature,
+            )
+
+            quotient_state = signature_to_class.get(signature)
+            if quotient_state is None:
+                quotient_state = len(minimized_nodes)
+                signature_to_class[signature] = quotient_state
+
+                minimized_nodes.append(
+                    _AcyclicObservationNode(node.output)
                 )
 
-        return nodes, node_index, edges
+                minimized_nodes[quotient_state].successors = {
+                    letter: representative[successor]
+                    for letter, successor in sorted(
+                        node.successors.items(),
+                        key=lambda item: alphabet_index[item[0]],
+                    )
+                    if successor.leads_to_known
+                }
+
+            representative[node] = quotient_state
+
+        # --------------------------------------------------------------
+        # Re-index from the root. DFAMiner's resulting states are numbered by
+        # the order in which the minimized automaton is traversed; using BFS
+        # here gives deterministic compact numbering and ensures state 0 is
+        # the initial state for the SAT encoding.
+        # --------------------------------------------------------------
+        root_old = representative[self.root]
+        old_to_new = {root_old: 0}
+        ordered_old_states = [root_old]
+        queue = deque([root_old])
+
+        while queue:
+            old_state = queue.popleft()
+            node = minimized_nodes[old_state]
+
+            for successor in node.successors.values():
+                if successor not in old_to_new:
+                    old_to_new[successor] = len(ordered_old_states)
+                    ordered_old_states.append(successor)
+                    queue.append(successor)
+
+        nodes = [
+            _AcyclicObservationNode(
+                minimized_nodes[old_state].output
+            )
+            for old_state in ordered_old_states
+        ]
+
+        for old_state, new_state in old_to_new.items():
+            nodes[new_state].successors = {
+                letter: old_to_new[successor]
+                for letter, successor in minimized_nodes[old_state].successors.items()
+            }
+
+        edges = []
+        for source, node in enumerate(nodes):
+            for letter, target in sorted(
+                node.successors.items(),
+                key=lambda item: alphabet_index[item[0]],
+            ):
+                edges.append((source, target, alphabet_index[letter]))
+
+        logger.debug(
+            "DFAMiner-style 3DFA minimization: %d -> %d states",
+            len(original_nodes),
+            len(nodes),
+        )
+
+        return nodes, {index: index for index in range(len(nodes))}, edges
 
     @staticmethod
     def _add_functional_simulation(clauses, edges, mapping_var, transition_var):
-        """Encode deterministic simulation with domain-pruned morphism variables."""
+        """Encode a functional simulation from the source graph to the DFA."""
         for source_idx, target_idx, letter_idx in edges:
             source_mapping = mapping_var[source_idx]
             target_mapping = mapping_var[target_idx]
 
-            for state, source_literal in source_mapping.items():
-                transition_row = transition_var[state][letter_idx]
+            for source_state in range(len(transition_var)):
+                source_literal = source_mapping[source_state]
+                transition_row = transition_var[source_state][letter_idx]
 
                 for target_state, transition_literal in enumerate(transition_row):
-                    target_literal = target_mapping.get(target_state)
-
-                    if target_literal is None:
-                        # target_state is impossible for the successor node,
-                        # so this transition cannot be selected whenever the
-                        # source node is mapped to `state`.
-                        clauses.append([-source_literal, -transition_literal])
-                    else:
-                        clauses.append(
-                            [
-                                -source_literal,
-                                -transition_literal,
-                                target_literal,
-                            ]
-                        )
-
-    def _compute_mapping_domains(
-        self,
-        nodes,
-        basis_index,
-        basis_size,
-        n_states,
-    ):
-        """Return the currently possible DFA states for each tree node."""
-        all_states = tuple(range(n_states))
-        free_states = tuple(range(basis_size, n_states))
-        domains = []
-
-        for node in nodes:
-            # Guaranteed basis nodes already have a fixed state identity.
-            if node in basis_index:
-                domains.append((basis_index[node],))
-                continue
-
-            # Frontier nodes use their Apartness-compatible basis states plus
-            # any state that does not yet have a guaranteed basis identity.
-            candidates = self.frontier_to_basis_dict.get(node)
-            if candidates is None:
-                domains.append(all_states)
-                continue
-
-            compatible_basis_states = tuple(
-                basis_index[candidate]
-                for candidate in sorted(candidates, key=basis_index.__getitem__)
-            )
-            domains.append(compatible_basis_states + free_states)
-
-        logger.debug(
-            "Morphism domains: %d nodes, %d total possible mappings",
-            len(domains),
-            sum(len(domain) for domain in domains),
-        )
-        return domains
-
-    def _add_basis_constraints(
-        self,
-        clauses,
-        mapping_var,
-        node_index,
-        basis_index,
-    ):
-        """Fix guaranteed basis nodes to their corresponding state IDs."""
-        for basis_node, state in basis_index.items():
-            node_idx = node_index[basis_node]
-            clauses.append([mapping_var[node_idx][state]])
-
-    @staticmethod
-    def _add_output_constraints(
-        clauses,
-        nodes,
-        mapping_var,
-        output_var,
-    ):
-        """Connect known observation outputs to DFA state outputs."""
-        for node_idx, node in enumerate(nodes):
-            if not ObservationTreeSquare.is_known(node):
-                continue
-
-            accepts = bool(node.output)
-            for state, mapping_literal in mapping_var[node_idx].items():
-                clauses.append(
-                    [
-                        -mapping_literal,
-                        output_var[state] if accepts else -output_var[state],
-                    ]
-                )
-
-    @staticmethod
-    def _add_bfs_symmetry_breaking(
-        clauses,
-        allocator,
-        transition_var,
-        basis_size,
-        n_states,
-        alphabet_size,
-    ):
-        """Add the current basis-aware BFS symmetry-breaking constraints."""
-        if basis_size >= n_states or alphabet_size == 0:
-            return
-
-        first = {}
-        for state in range(basis_size, n_states):
-            first[state] = [
-                [allocator.new() for _ in range(alphabet_size)]
-                for _ in range(state)
-            ]
-
-            clauses.append(
-                [
-                    first[state][parent][letter]
-                    for parent in range(state)
-                    for letter in range(alphabet_size)
-                ]
-            )
-
-            for parent in range(state):
-                for letter in range(alphabet_size):
-                    marker = first[state][parent][letter]
                     clauses.append([
-                        -marker,
-                        transition_var[parent][letter][state],
+                        -source_literal,
+                        -transition_literal,
+                        target_mapping[target_state],
                     ])
-
-                    for smaller_parent in range(parent):
-                        for smaller_letter in range(alphabet_size):
-                            clauses.append([
-                                -marker,
-                                -transition_var[
-                                    smaller_parent
-                                ][smaller_letter][state],
-                            ])
-
-                    for smaller_letter in range(letter):
-                        clauses.append([
-                            -marker,
-                            -transition_var[parent][smaller_letter][state],
-                        ])
-
-        # Order discovery descriptors of consecutive free states.
-        for state in range(basis_size, n_states - 1):
-            descriptor_count = state * alphabet_size
-            if descriptor_count == 0:
-                continue
-
-            prefix = [allocator.new() for _ in range(descriptor_count)]
-
-            for rank in range(descriptor_count):
-                parent = rank // alphabet_size
-                letter = rank % alphabet_size
-                current = prefix[rank]
-                marker = first[state][parent][letter]
-
-                if rank == 0:
-                    clauses.extend(([-current, marker], [-marker, current]))
-                else:
-                    previous = prefix[rank - 1]
-                    clauses.append([-current, previous, marker])
-                    clauses.append([-previous, current])
-                    clauses.append([-marker, current])
-
-            # A next state must be discovered strictly later.
-            for rank in range(descriptor_count):
-                parent = rank // alphabet_size
-                letter = rank % alphabet_size
-                marker_next = first[state + 1][parent][letter]
-
-                if rank == 0:
-                    clauses.append([-marker_next])
-                else:
-                    clauses.append([-marker_next, prefix[rank - 1]])
 
     @staticmethod
     def _extract_sat_model(
@@ -841,8 +690,9 @@ class ObservationTreeSquare:
         n_states,
         alphabet_size,
     ):
-        """Extract transition and output tables from a SAT model."""
-        model_set = set(solver.get_model())
+        """Extract the target DFA transition and output tables from a SAT model."""
+        model = solver.get_model()
+        model_set = set(model)
 
         transition_mapping = [
             [0 for _ in range(alphabet_size)]
@@ -851,16 +701,12 @@ class ObservationTreeSquare:
 
         for state in range(n_states):
             for letter in range(alphabet_size):
-                selected_target = next(
-                    (
-                        target
-                        for target, literal in enumerate(
-                            transition_var[state][letter]
-                        )
-                        if literal in model_set
-                    ),
-                    None,
-                )
+                selected_target = None
+
+                for target in range(n_states):
+                    if transition_var[state][letter][target] in model_set:
+                        selected_target = target
+                        break
 
                 if selected_target is None:
                     raise RuntimeError(
@@ -869,7 +715,11 @@ class ObservationTreeSquare:
 
                 transition_mapping[state][letter] = selected_target
 
-        output_mapping = [literal in model_set for literal in output_var]
+        output_mapping = [
+            output_var[state] in model_set
+            for state in range(n_states)
+        ]
+
         return transition_mapping, output_mapping
 
     def build_hypothesis(self):

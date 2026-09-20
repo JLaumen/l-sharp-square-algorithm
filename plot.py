@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-CSV_PATH_A = "benchmarking/results/benchmark_t200_rFalse_cFalse_all.csv"
-CSV_PATH_B = "benchmarking/results/benchmark2_t200_rFalse_cFalse_all.csv"
+CSV_PATH_A = "benchmarking/results/benchmark2_t200_rFalse_cFalse_all.csv"
+CSV_PATH_B = "benchmarking/results/benchmark2_t200_rTrue_cFalse_all.csv"
 OUT_PNG = "vs_comp.pdf"
 
 

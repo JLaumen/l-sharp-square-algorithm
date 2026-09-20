@@ -2,6 +2,7 @@ import argparse
 import concurrent.futures
 import logging
 import os
+from multiprocessing.spawn import freeze_support
 from typing import Any
 
 from IncompleteDfaSUL import IncompleteDfaSUL
@@ -94,7 +95,7 @@ def process_file(file_name: str, target_folder: str, solver_timeout, replace_bas
 
 def run_test_cases_pool(file: str, extension: str, solver_timeout, replace_basis, use_compatibility,
                         jobs: int | None = None) -> None:
-    with open(f"benchmarking/results/benchmark3{extension}_{file}.csv", "w") as f:
+    with open(f"benchmarking/results/benchmark2{extension}_{file}.csv", "w") as f:
         f.write("file name,succeeded,learning_rounds,automaton_size,learning_time,"
                 "smt_time,eq_oracle_time,total_time,queries_learning,validity_query,nodes,"
                 "informative_nodes,sul_steps,queries_eq_oracle,steps_eq_oracle\n")
@@ -136,11 +137,12 @@ def main(solver_timeout: int = 200, replace_basis: bool = False, use_compatibili
         print("Validity queries:", info['validity_query'])
         print("Input symbols:", info['sul_steps'])
     else:
-        run_test_cases_pool("s23", f"_t{solver_timeout}_r{replace_basis}_c{use_compatibility}", solver_timeout,
+        run_test_cases_pool("all", f"_t{solver_timeout}_r{replace_basis}_c{use_compatibility}", solver_timeout,
                             replace_basis, use_compatibility, jobs)
 
 
 if __name__ == "__main__":
+    freeze_support()
     parser = argparse.ArgumentParser(description="Run benchmarks in run_benchmarks.py")
     parser.add_argument("-t", "--timeout", type=int, default=200, help="Solver timeout in seconds. Default: 200")
     parser.add_argument("-r", "--replace-basis", action="store_true", dest="replace_basis",
