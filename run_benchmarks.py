@@ -107,6 +107,9 @@ def run_test_cases_pool(file: str, extension: str, solver_timeout, replace_basis
         logging.info(
             f"Solver timeout: {solver_timeout} seconds, replace_basis: {replace_basis}, use_compatibility: {use_compatibility}, jobs: {jobs}")
 
+        # Filter out randm22 and randm23 files
+        # file_names = [f for f in file_names if not ("randm22" in f or "randm23" in f)]
+
         # If jobs is None, do not run in parallel
         if jobs is None:
             for file_name in file_names:

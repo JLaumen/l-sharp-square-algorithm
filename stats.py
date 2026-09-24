@@ -2,7 +2,7 @@ import math
 
 import pandas as pd
 
-CSV_PATH = "benchmarking/results/benchmark2_t200_rTrue_cFalse_all.csv"
+CSV_PATH = "benchmarking/results/benchmark_t200_rTrue_cFalse_all.csv"
 
 
 def to_bool(x):
