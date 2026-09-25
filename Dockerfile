@@ -27,6 +27,7 @@ RUN python -m pip install --upgrade pip \
         numpy==2.5.3 \
         pandas==3.0.6 \
         stopit==1.1.2 \
+        z3-solver
 
 # Download repo.
 RUN git clone \
