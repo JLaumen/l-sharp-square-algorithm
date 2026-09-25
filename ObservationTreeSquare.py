@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import time
 from collections import deque
 from collections.abc import Iterable, Sequence
@@ -15,6 +16,8 @@ from pysat.solvers import Cadical153
 from Apartness import Apartness
 from DCNode import DCNode
 from DCValue import DCValue
+
+logging.basicConfig(level=logging.DEBUG, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 
 
 class _SatVariableAllocator:
@@ -79,7 +82,7 @@ class ObservationTreeSquare:
     """
 
     def __init__(self, alphabet: Sequence[Any], sul: Any, replace_basis: bool = True,
-            assume_prefix_closed: bool = True, ) -> None:
+                 assume_prefix_closed: bool = True, ) -> None:
         self.automaton_type = 'dfa'
         self.alphabet = list(alphabet)
         self.sul = sul
@@ -137,7 +140,7 @@ class ObservationTreeSquare:
         if candidates is None:
             return
         self.frontier_to_basis_dict[frontier_node] = {candidate for candidate in candidates if
-            not Apartness.states_are_apart(frontier_node, candidate, self)}
+                                                      not Apartness.states_are_apart(frontier_node, candidate, self)}
 
     def _update_frontier_to_basis_dict(self) -> None:
         self._update_frontier_to_basis_dict_dfs(self.root)
@@ -277,7 +280,7 @@ class ObservationTreeSquare:
             if node in basis_set:
                 continue
             frontier[node] = {basis_node for basis_node in basis if
-                not Apartness.states_are_apart(node, basis_node, self)}
+                              not Apartness.states_are_apart(node, basis_node, self)}
         self.frontier_to_basis_dict = frontier
 
     def _promote_node_to_basis(self) -> bool:
@@ -318,7 +321,7 @@ class ObservationTreeSquare:
     def _get_identification_witnesses(self, frontier_node: DCNode) -> Iterable[list[Any]]:
         candidates = list(self.frontier_to_basis_dict.get(frontier_node, ()))
         yield from self._filter_unused_witnesses(frontier_node,
-            Apartness.get_distinguishing_sequences(candidates, self), )
+                                                 Apartness.get_distinguishing_sequences(candidates, self), )
 
     def _filter_unused_witnesses(self, frontier_node: DCNode, witnesses: Iterable[list[Any]], ) -> Iterable[list[Any]]:
         for witness_sequence in witnesses:
@@ -327,7 +330,7 @@ class ObservationTreeSquare:
                 yield witness_sequence
 
     def _compute_mapping_domains(self, nodes: Sequence[DCNode], basis_index: dict[DCNode, int], basis_size: int,
-            number_of_states: int, ) -> list[set[int]]:
+                                 number_of_states: int, ) -> list[set[int]]:
         all_states = set(range(number_of_states))
         free_states = set(range(basis_size, number_of_states))
         domains: list[set[int]] = []
@@ -398,11 +401,11 @@ class ObservationTreeSquare:
                 if not left_domain or not right_domain:
                     return None
         return [(left, right) for left, right in apart_pairs if
-            not mapping_domains[left].isdisjoint(mapping_domains[right])]
+                not mapping_domains[left].isdisjoint(mapping_domains[right])]
 
     @staticmethod
     def _compute_transition_domains(edges: Sequence[tuple[int, int, int]], mapping_domains: Sequence[set[int]],
-            number_of_states: int, alphabet_size: int, ) -> list[list[set[int]]]:
+                                    number_of_states: int, alphabet_size: int, ) -> list[list[set[int]]]:
         all_states = set(range(number_of_states))
         transition_domains = [[set() for _ in range(alphabet_size)] for _ in range(number_of_states)]
         constrained = [[False for _ in range(alphabet_size)] for _ in range(number_of_states)]
@@ -437,16 +440,16 @@ class ObservationTreeSquare:
             if apart_pairs is None:
                 return None
             transition_domains = self._compute_transition_domains(edges, mapping_domains, number_of_states,
-                alphabet_size, )
+                                                                  alphabet_size, )
             if any(not transition_domains[state][letter] for state in range(number_of_states) for letter in
                    range(alphabet_size)):
                 return None
             allocator = _SatVariableAllocator()
             mapping_variables: list[dict[int, int]] = [{state: allocator.new() for state in sorted(domain)} for domain
-                in mapping_domains]
+                                                       in mapping_domains]
             transition_variables: list[list[dict[int, int]]] = [
                 [{target: allocator.new() for target in sorted(transition_domains[state][letter])} for letter in
-                    range(alphabet_size)] for state in range(number_of_states)]
+                 range(alphabet_size)] for state in range(number_of_states)]
             output_variables = [allocator.new() for _ in range(number_of_states)]
             clauses: list[list[int]] = []
             for mapping in mapping_variables:
@@ -458,7 +461,7 @@ class ObservationTreeSquare:
             self._add_apartness_constraints(clauses, apart_pairs, mapping_variables)
             self._add_output_constraints(clauses, nodes, mapping_variables, output_variables)
             self._add_bfs_symmetry_breaking(clauses, allocator, transition_variables, basis_size, number_of_states,
-                alphabet_size, )
+                                            alphabet_size, )
             solver = Cadical153(bootstrap_with=clauses)
             result = solver.solve()
             if result is False:
@@ -466,7 +469,7 @@ class ObservationTreeSquare:
             if result is not True:
                 raise RuntimeError(f'Unexpected CaDiCaL result: {result!r}.')
             return self._extract_sat_model(solver, transition_variables, output_variables, number_of_states,
-                alphabet_size, )
+                                           alphabet_size, )
         finally:
             if solver is not None:
                 solver.delete()
@@ -493,8 +496,8 @@ class ObservationTreeSquare:
 
     @staticmethod
     def _add_functional_simulation(clauses: list[list[int]], edges: Sequence[tuple[int, int, int]],
-            mapping_variables: Sequence[dict[int, int]],
-            transition_variables: Sequence[Sequence[dict[int, int]]], ) -> None:
+                                   mapping_variables: Sequence[dict[int, int]],
+                                   transition_variables: Sequence[Sequence[dict[int, int]]], ) -> None:
         for source_index, target_index, letter_index in edges:
             source_mapping = mapping_variables[source_index]
             target_mapping = mapping_variables[target_index]
@@ -509,7 +512,7 @@ class ObservationTreeSquare:
 
     @staticmethod
     def _add_apartness_constraints(clauses: list[list[int]], apart_pairs: Sequence[tuple[int, int]],
-            mapping_variables: Sequence[dict[int, int]], ) -> None:
+                                   mapping_variables: Sequence[dict[int, int]], ) -> None:
         for left, right in apart_pairs:
             common_states = mapping_variables[left].keys() & mapping_variables[right].keys()
             for state in common_states:
@@ -517,7 +520,7 @@ class ObservationTreeSquare:
 
     @staticmethod
     def _add_output_constraints(clauses: list[list[int]], nodes: Sequence[DCNode],
-            mapping_variables: Sequence[dict[int, int]], output_variables: Sequence[int], ) -> None:
+                                mapping_variables: Sequence[dict[int, int]], output_variables: Sequence[int], ) -> None:
         for node_index, node in enumerate(nodes):
             if not ObservationTreeSquare._is_known(node):
                 continue
@@ -528,8 +531,8 @@ class ObservationTreeSquare:
 
     @staticmethod
     def _add_bfs_symmetry_breaking(clauses: list[list[int]], allocator: _SatVariableAllocator,
-            transition_variables: Sequence[Sequence[dict[int, int]]], basis_size: int, number_of_states: int,
-            alphabet_size: int, ) -> None:
+                                   transition_variables: Sequence[Sequence[dict[int, int]]], basis_size: int,
+                                   number_of_states: int, alphabet_size: int, ) -> None:
         if basis_size >= number_of_states or alphabet_size == 0:
             return
         first: dict[int, list[list[int]]] = {}
@@ -582,7 +585,7 @@ class ObservationTreeSquare:
 
     @staticmethod
     def _extract_sat_model(solver: Cadical153, transition_variables: Sequence[Sequence[dict[int, int]]],
-            output_variables: Sequence[int], number_of_states: int, alphabet_size: int, ) -> tuple[
+                           output_variables: Sequence[int], number_of_states: int, alphabet_size: int, ) -> tuple[
         list[list[int]], list[bool]]:
         model = set(solver.get_model())
         transition_mapping = [[0 for _ in range(alphabet_size)] for _ in range(number_of_states)]
@@ -598,7 +601,7 @@ class ObservationTreeSquare:
         return (transition_mapping, output_mapping)
 
     def _construct_hypothesis(self, transition_mapping: Sequence[Sequence[int]],
-            output_mapping: Sequence[bool], ) -> Dfa:
+                              output_mapping: Sequence[bool], ) -> Dfa:
         states = [DfaState(f's{index}') for index in range(self.size)]
         for state_index, state in enumerate(states):
             state.is_accepting = output_mapping[state_index]

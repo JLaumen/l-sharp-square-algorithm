@@ -86,7 +86,7 @@ def run_lsharp_square(alphabet: list, sul: Any, eq_oracle: Oracle, return_data: 
             break
 
         # Add the counterexample to the observation tree.
-        observation_tree.process_counter_example(counterexample, sul.query(tuple(counterexample[0])), )
+        observation_tree.process_counter_example(counterexample[0], sul.query(tuple(counterexample[0])), )
 
     total_time = time.time() - start_time
     solver_time = observation_tree.solver_time

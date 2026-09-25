@@ -23,11 +23,10 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install \
         aalpy==1.3.2 \
         automata-lib==8.4.0 \
-        z3-solver==4.13.0.0 \
+        python-sat \
         numpy==2.5.3 \
         pandas==3.0.6 \
         stopit==1.1.2 \
-        pysmt
 
 # Download repo.
 RUN git clone \
