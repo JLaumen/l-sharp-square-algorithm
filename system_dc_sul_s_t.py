@@ -1,4 +1,5 @@
 from aalpy.base import SUL
+from DCValue import DCValue
 
 
 class SystemDCSULST(SUL):
@@ -8,17 +9,28 @@ class SystemDCSULST(SUL):
         self.system_sul = system_sul
         self.membership_queries = 0
         self.system_queries = 0
-        self.label_mapper = {True: True, False: False, None: "unknown"}
+
+    @staticmethod
+    def _to_dc_value(value):
+        if isinstance(value, DCValue):
+            return value
+        if value is True:
+            return DCValue.TRUE
+        if value is False:
+            return DCValue.FALSE
+        if value is None:
+            return DCValue.DC
+        raise ValueError(f"Unsupported system output: {value!r}")
 
     def query(self, word):
         self.pre()
-        system_out = False
+        system_out = DCValue.FALSE
         for letter in word:
             t_out = self.T.step(letter)
-            system_out = self.label_mapper[self.system_sul.step(letter)]
+            system_out = self._to_dc_value(self.system_sul.step(letter))
             if not t_out:
                 self.post()
-                return "unknown"
+                return DCValue.DC
         self.post()
         return system_out
 
@@ -32,9 +44,9 @@ class SystemDCSULST(SUL):
 
     def step(self, letter):
         t_out = self.T.step(letter)
-        system_out = self.label_mapper[self.system_sul.step(letter)]
+        system_out = self._to_dc_value(self.system_sul.step(letter))
         if not t_out:
-            return "unknown"
+            return DCValue.DC
         return system_out
 
 

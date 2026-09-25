@@ -3,6 +3,15 @@ from random import shuffle, choice, randint
 
 from aalpy.base.Oracle import Oracle
 from aalpy.base.SUL import SUL
+from DCValue import DCValue
+
+
+def _outputs_differ(hypothesis_output: bool, sul_output: DCValue) -> bool:
+    """Return whether a known SUL output disagrees with the hypothesis."""
+    if sul_output is DCValue.DC:
+        return False
+    expected = DCValue.TRUE if hypothesis_output else DCValue.FALSE
+    return sul_output is not expected
 
 
 class WMethodEqOracle(Oracle):
@@ -64,7 +73,7 @@ class WMethodEqOracle(Oracle):
                     self.num_steps += 1
 
                     outputs.append(out_sul)
-                    if out_hyp != out_sul:
+                    if _outputs_differ(out_hyp, out_sul):
                         self.sul.post()
                         return seq[:ind + 1]
                 self.cache.add(seq)
@@ -103,8 +112,9 @@ class RandomWMethodEqOracle(Oracle):
         for label, trace in self.traces:
             if label == "?":
                 continue
-            label = True if label == "+" else False
-            if hypothesis.execute_sequence(hypothesis.initial_state, trace)[-1] != label:
+            label = DCValue.TRUE if label == "+" else DCValue.FALSE
+            hypothesis_output = hypothesis.execute_sequence(hypothesis.initial_state, trace)[-1]
+            if hypothesis_output is not label:
                 return [trace]
 
         if not hypothesis.characterization_set:
@@ -139,10 +149,10 @@ class RandomWMethodEqOracle(Oracle):
                 output_sul = self.sul.step(i)
                 self.num_steps += 1
 
-                if output_sul == "unknown":
+                if output_sul is DCValue.DC:
                     break
 
-                if output_sul != output_hyp and output_sul != "unknown":
+                if _outputs_differ(output_hyp, output_sul):
                     cexs.append(test_case[: ind + 1])
                     if len(cexs) >= 100:
                         self.sul.post()

@@ -1,205 +1,180 @@
+from __future__ import annotations
+
 from collections import deque
+from collections.abc import Iterable
+from typing import Any
+
+from DCValue import DCValue
 
 
 class Apartness:
-    @staticmethod
-    def incompatible_output(output1, output2):
-        return output1 != output2 and output1 is not None and output2 is not None and output1 != "unknown" and output2 != "unknown"
+    """Utilities for checking and witnessing apartness in an observation tree.
+
+    Two observation-tree nodes are apart when there is a suffix for which
+    both nodes have known outputs and those outputs differ.
+    """
 
     @staticmethod
-    def compute_witness(state1, state2, ob_tree):
-        # Finds a distinguishing sequence between two states if they are apart based on the observation tree
-        if ob_tree.automaton_type == 'mealy':
-            state1_destination = Apartness._show_states_are_apart_mealy(state1, state2, ob_tree.alphabet)
-        else:
-            state1_destination = Apartness._show_states_are_apart_moore(state1, state2, ob_tree.alphabet)
-        if not state1_destination:
+    def _outputs_are_apart(first_output: DCValue | None, second_output: DCValue | None, ) -> bool:
+        """Return whether two stored outputs constitute a distinction."""
+        if first_output is None or second_output is None:
+            return False
+
+        if not first_output.is_known() or not second_output.is_known():
+            return False
+
+        return first_output != second_output
+
+    @staticmethod
+    def compute_witness(state1: Any, state2: Any, observation_tree: Any, ) -> list[Any] | None:
+        """Find a distinguishing sequence between two observation-tree nodes.
+
+        Args:
+            state1: First observation-tree node.
+            state2: Second observation-tree node.
+            observation_tree: Observation tree containing the states.
+
+        Returns:
+            A distinguishing input sequence, or ``None`` if the states are
+            not apart.
+        """
+        destination = Apartness._show_states_are_apart_moore(state1, state2, observation_tree.alphabet, )
+
+        if destination is None:
             return None
-        return ob_tree.get_transfer_sequence(state1, state1_destination)
+
+        return observation_tree.get_transfer_sequence(state1, destination, )
 
     @staticmethod
-    def states_are_apart(state1, state2, ob_tree):
-        # Checks if two states are apart by checking any output difference in the observation tree
-        if ob_tree.automaton_type == 'mealy':
-            return Apartness._show_states_are_apart_mealy(state1, state2, ob_tree.alphabet) is not None
-        else:
-            return Apartness._show_states_are_apart_moore(state1, state2, ob_tree.alphabet) is not None
+    def states_are_apart(state1: Any, state2: Any, observation_tree: Any, ) -> bool:
+        """Check whether two observation-tree nodes are apart.
+
+        Args:
+            state1: First observation-tree node.
+            state2: Second observation-tree node.
+            observation_tree: Observation tree containing the states.
+
+        Returns:
+            ``True`` if a known output difference can be observed from the
+            two states, otherwise ``False``.
+        """
+        return (Apartness._show_states_are_apart_moore(state1, state2, observation_tree.alphabet, ) is not None)
 
     @staticmethod
-    def _show_states_are_apart_mealy(first, second, alphabet):
-        # Identifies if two states can be distinguished by any input-output pair in the provided alphabet
+    def _show_states_are_apart_moore(first: Any, second: Any, alphabet: list[Any], ) -> Any | None:
+        """Find a node witnessing apartness between two Moore states."""
         pairs = deque([(first, second)])
 
         while pairs:
             first_node, second_node = pairs.popleft()
-            for input_val in alphabet:
-                first_output = first_node.get_output(input_val)
-                second_output = second_node.get_output(input_val)
 
-                if first_output is not None and second_output is not None:
-                    if first_output != second_output and (
-                            first_output not in ["unknown", None] and second_output not in ["unknown", None]):
-                        return first_node.get_successor(input_val)
+            if first_node is None or second_node is None:
+                continue
 
-                    pairs.append((first_node.get_successor(input_val), second_node.get_successor(input_val)))
+            if Apartness._outputs_are_apart(first_node.output, second_node.output, ):
+                return first_node
 
-        return None
-
-    @staticmethod
-    def _show_states_are_apart_moore(first, second, alphabet):
-        # Identifies if two states can be distinguished by any input-output pair in the provided alphabet
-        pairs = deque([(first, second)])
-        while pairs:
-            first_node, second_node = pairs.popleft()
-            if first_node is not None and second_node is not None:
-                first_output = first_node.output
-                second_output = second_node.output
-                if first_output != second_output and (
-                        first_output not in ["unknown", None] and second_output not in ["unknown", None]):
-                    return first_node
-
-                for input_val in alphabet:
-                    pairs.append((first_node.get_successor(input_val), second_node.get_successor(input_val)))
+            for input_value in alphabet:
+                pairs.append((first_node.get_successor(input_value), second_node.get_successor(input_value),))
 
         return None
 
     @staticmethod
-    def get_successors(node, input_val):
-        for inp in input_val:
+    def get_successors(node: Any, input_sequence: Iterable[Any], ) -> Any | None:
+        """Follow an input sequence from an observation-tree node.
+
+        Args:
+            node: Starting observation-tree node.
+            input_sequence: Input sequence to follow.
+
+        Returns:
+            The reached node, or ``None`` if the sequence is not present.
+        """
+        for input_value in input_sequence:
             if node is None:
                 return None
-            node = node.get_successor(inp)
+            node = node.get_successor(input_value)
+
         return node
 
     @staticmethod
-    def states_are_incompatible(first, second, ob_tree, experiment=True):
-        if not first.leads_to_known or not second.leads_to_known:
-            return False
-        if not ob_tree.use_compatibility:
-            return Apartness.states_are_apart(first, second, ob_tree)
+    def get_distinguishing_sequences(group: list[Any], observation_tree: Any, ) -> Iterable[list[Any]]:
+        """Generate suffixes that distinguish members of a node group.
 
-        # Assumes that a node cannot be a descendant of a node with a higher id
-        if second.id < first.id:
-            first, second = second, first
+        A suffix is yielded when at least two nodes in the group have known
+        and different outputs after applying that suffix.
 
-        # This should not happen, but just in case
-        if first.id == second.id:
-            return False
+        Args:
+            group: Observation-tree nodes to distinguish.
+            observation_tree: Observation tree containing the nodes.
 
-        # Checking apartness is easier than checking incompatibility,
-        # so we check that first
-        if Apartness.states_are_apart(first, second, ob_tree):
-            return True
-
-        # Incompatibility can now only occur if the second node is a descendant of the first node.
-        parent = second.parent
-        while parent is not None and parent.id != first.id:
-            parent = parent.parent
-        if parent is None:
-            return False
-
-        # Try merging the two nodes, and see if there is a conflict.
-        # In case of a conflict, we get the access sequences to the nodes causing the conflict
-        conflicts = Apartness.merge(first, second, ob_tree)
-        if not experiment:
-            return conflicts != []
-
-        for first_access, second_access in conflicts:
-            # Incompatible!
-
-            # Construct possible candidates that can prove apartness.
-            transfer_sequence = ob_tree.get_transfer_sequence(first, second)
-            suffix = transfer_sequence + first_access[len(first.access_sequence):]
-            candidate = first.access_sequence + suffix
-            candidates = []
-
-            while candidate != second_access:
-                candidates.append(candidate)
-                suffix = transfer_sequence + suffix
-                candidate = first.access_sequence + suffix
-
-            for candidate in candidates:
-                _ = ob_tree.experiment(candidate)
-
-        return conflicts != []
-
-    @staticmethod
-    def merge(first, second, ob_tree):
+        Yields:
+            Input sequences that distinguish at least two nodes.
         """
-        Merge the second node into the first node.
-        :param first: Node to merge into
-        :param second: Node to merge from
-        :param ob_tree: Observation tree
-        :return: Whether there was a conflict during the merge
-        """
-        # Obtain the transfer sequence from first to second
-        transfer_sequence = ob_tree.get_transfer_sequence(first, second)
-        sequence = transfer_sequence.copy()
-        conflicts = []
-        while True:
-            first_node = first
-            second_node = Apartness.get_successors(second, sequence)
-            if second_node is None:
-                break
-            witnesses = Apartness.get_distinguishing_sequences([first_node, second_node], ob_tree)
-            for witness in witnesses:
-                first_conflict = first_node.access_sequence + witness
-                second_conflict = second_node.access_sequence + witness
-                conflicts.append((first_conflict, second_conflict))
-            sequence += transfer_sequence
-        return conflicts
+        yield from Apartness._get_distinguishing_sequences_moore(group, observation_tree.alphabet, )
 
     @staticmethod
-    def get_distinguishing_sequences(group, ob_tree):
-        return Apartness._get_distinguishing_sequences_moore(group, ob_tree.alphabet)
-
-    @staticmethod
-    def _get_distinguishing_sequences_moore(group, alphabet):
-        # Identifies if two states can be distinguished by any input-output pair in the provided alphabet
+    def _get_distinguishing_sequences_moore(group: list[Any], alphabet: list[Any], ) -> Iterable[list[Any]]:
+        """Generate distinguishing sequences for Moore/DFA nodes."""
         groups = deque([([], group)])
+
         while groups:
-            access_seq, group = groups.popleft()
-            valid_group = [node for node in group if node is not None and node.leads_to_known]
+            access_sequence, current_group = groups.popleft()
+
+            valid_group = [node for node in current_group if node is not None and node.leads_to_known]
+
             if len(valid_group) >= 2:
-                outputs = set([node.output for node in valid_group])
-                if "unknown" in outputs:
-                    outputs.remove("unknown")
-                if None in outputs:
-                    outputs.remove(None)
-                if len(outputs) >= 2:
-                    yield access_seq
+                has_true = any(node.output is DCValue.TRUE for node in valid_group)
+                has_false = any(node.output is DCValue.FALSE for node in valid_group)
 
-                for input_val in alphabet:
-                    groups.append((access_seq + [input_val], [node.get_successor(input_val) for node in valid_group]))
+                if has_true and has_false:
+                    yield access_sequence
 
-    @staticmethod
-    def compute_witness_in_tree_and_hypothesis_states(ob_tree, ob_tree_state, hyp_state):
-        """
-        Determines if the observation tree and the hypothesis are distinguishable based on their state outputs
-        """
-        return Apartness.compute_witness_in_tree_and_hypothesis_states_moore(ob_tree, ob_tree_state, hyp_state)
+                for input_value in alphabet:
+                    groups.append(
+                        (access_sequence + [input_value], [node.get_successor(input_value) for node in valid_group],))
 
     @staticmethod
-    def compute_witness_in_tree_and_hypothesis_states_moore(ob_tree, ob_tree_state, hyp_state):
+    def compute_witness_in_tree_and_hypothesis_states(observation_tree: Any, observation_tree_state: Any,
+            hypothesis_state: Any, ) -> list[Any] | None:
+        """Find a distinguishing sequence between a tree and DFA state.
+
+        Args:
+            observation_tree: Observation tree.
+            observation_tree_state: Starting observation-tree node.
+            hypothesis_state: Hypothesis DFA state.
+
+        Returns:
+            A distinguishing input sequence, or ``None`` if no distinction
+            is currently known.
         """
-        Determines if the observation tree and the hypothesis are distinguishable based on their state outputs
-        """
-        pairs = deque([(ob_tree_state, hyp_state)])
+        return Apartness.compute_witness_in_tree_and_hypothesis_states_moore(observation_tree, observation_tree_state,
+            hypothesis_state, )
+
+    @staticmethod
+    def compute_witness_in_tree_and_hypothesis_states_moore(observation_tree: Any, observation_tree_state: Any,
+            hypothesis_state: Any, ) -> list[Any] | None:
+        """Compare an incomplete observation tree with a DFA hypothesis."""
+        pairs = deque([(observation_tree_state, hypothesis_state)])
 
         while pairs:
             tree_state, hyp_state = pairs.popleft()
-            if (tree_state is not None) and (hyp_state is not None):
-                tree_output = tree_state.output
-                if ob_tree.automaton_type == 'dfa':
-                    hyp_output = hyp_state.is_accepting
-                else:
-                    hyp_output = hyp_state.output
 
-                if tree_output != hyp_output and tree_output not in ["unknown", None]:
-                    return ob_tree.get_transfer_sequence(ob_tree_state, tree_state)
+            if tree_state is None or hyp_state is None:
+                continue
 
-                for input_val in ob_tree.alphabet:
-                    if input_val in hyp_state.transitions:
-                        pairs.append((tree_state.get_successor(input_val), hyp_state.transitions[input_val]))
+            tree_output = tree_state.output
+
+            # Unknown/unobserved tree outputs cannot distinguish a hypothesis.
+            if (tree_output is not None and tree_output.is_known()):
+                hypothesis_output = hyp_state.is_accepting
+                tree_accepts = tree_output is DCValue.TRUE
+
+                if tree_accepts != hypothesis_output:
+                    return observation_tree.get_transfer_sequence(observation_tree_state, tree_state, )
+
+            for input_value in observation_tree.alphabet:
+                if input_value in hyp_state.transitions:
+                    pairs.append((tree_state.get_successor(input_value), hyp_state.transitions[input_value],))
 
         return None

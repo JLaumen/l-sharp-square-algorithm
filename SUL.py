@@ -1,4 +1,5 @@
 from aalpy.base import SUL
+from DCValue import DCValue
 
 
 class SystemDCSULST(SUL):
@@ -8,7 +9,17 @@ class SystemDCSULST(SUL):
         self.system_sul = system_sul
         self.membership_queries = 0
         self.system_queries = 0
-        self.label_mapper = {True: True, False: False, None: "unknown"}
+
+    def _to_dc_value(self, value):
+        if isinstance(value, DCValue):
+            return value
+        if value is True:
+            return DCValue.TRUE
+        if value is False:
+            return DCValue.FALSE
+        if value is None:
+            return DCValue.DC
+        raise ValueError(f"Unsupported system output: {value!r}")
 
     def query(self, word):
         self.T.reset_to_initial()
@@ -16,19 +27,21 @@ class SystemDCSULST(SUL):
         b_labels = []
         if len(word) == 0:
             m_labels.append(self.T.initial_state.is_accepting)
-            b_labels.append(False)
+            b_labels.append(DCValue.FALSE)
         else:
             for letter in word:
                 m_labels.append(self.T.step(letter))
             if any(m_labels):
                 last_true = len(m_labels) - 1 - m_labels[::-1].index(True)
-                b_labels = list(self.system_sul.query(word[:last_true + 1])) + [False] * (len(word) - last_true - 1)
+                b_labels = list(self.system_sul.query(word[:last_true + 1])) + [
+                    DCValue.FALSE
+                ] * (len(word) - last_true - 1)
             else:
-                b_labels = [False] * len(word)
+                b_labels = [DCValue.FALSE] * len(word)
 
         self.T.reset_to_initial()
-        b_labels = [self.label_mapper[x] for x in b_labels]
-        final = [in_b if in_m else "unknown" for in_m, in_b in zip(m_labels, b_labels)]
+        b_labels = [self._to_dc_value(x) for x in b_labels]
+        final = [in_b if in_m else DCValue.DC for in_m, in_b in zip(m_labels, b_labels)]
         return final[0]
 
     def pre(self):
@@ -41,9 +54,9 @@ class SystemDCSULST(SUL):
 
     def step(self, letter):
         t_out = self.T.step(letter)
-        system_out = self.label_mapper[self.system_sul.step(letter)]
+        system_out = self._to_dc_value(self.system_sul.step(letter))
         if not t_out:
-            return "unknown"
+            return DCValue.DC
         return system_out
 
 

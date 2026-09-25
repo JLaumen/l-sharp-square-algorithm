@@ -1,6 +1,6 @@
 import argparse
 from main_single import main_single
-from stopit import SignalTimeout as Timeout
+# from stopit import SignalTimeout as Timeout
 import random
 import warnings
 
@@ -24,7 +24,4 @@ else:
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     for benchmark in benchmarks:
-        with Timeout(60.0*60*10) as timeout_ctx:
-            results = main_single(benchmark, single)
-        if timeout_ctx.state == timeout_ctx.TIMED_OUT:
-            results = {"benchmark": benchmark, "L* time": 0}
+        results = main_single(benchmark, single)
