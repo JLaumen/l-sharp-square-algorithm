@@ -1,20 +1,16 @@
+import logging
 import random
 
 from aalpy.base.SUL import CacheSUL
 from aalpy.utils import make_input_complete, load_automaton_from_file
-from algorithm import learn
-from complete_dfa_oracle import CompleteDFAOracle
 from data.counter_examples import counter_examples_dict
-from dfa3_encoder import DFA3Encoder
-from fa_learner import FALearner
-from rc_lstar import run_Lstar
 from rers_sul_s_t import RERSSULST
-from rpni_learner import RPNILearner
-from system_dc_oracle_s_t import SystemDCOracleST
 
 from LSharpSquare import run_lsharp_square
 from Oracle import RandomWMethodEqOracle
 from system_dc_sul_s_t import SystemDCSULST
+
+logging.basicConfig(level=logging.DEBUG, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 
 
 def run(example, t_type, single):

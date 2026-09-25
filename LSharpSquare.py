@@ -76,17 +76,19 @@ def run_lsharp_square(alphabet: list, sul: Any, eq_oracle: Oracle, return_data: 
         if hypothesis is None:
             continue
 
+        break
+
         # Ask the equivalence oracle for a counterexample.
         eq_query_start = time.time()
-        counterexample = eq_oracle.find_cex(hypothesis)
+        counterexamples = eq_oracle.find_cex(hypothesis)
         eq_query_time += time.time() - eq_query_start
         validity_queries += 1
 
-        if counterexample is None:
+        if not counterexamples:
             break
 
-        # Add the counterexample to the observation tree.
-        observation_tree.process_counter_example(counterexample[0], sul.query(tuple(counterexample[0])), )
+        for counterexample in counterexamples:
+            observation_tree.process_counter_example(counterexample, sul.query(tuple(counterexample)), )
 
     total_time = time.time() - start_time
     solver_time = observation_tree.solver_time

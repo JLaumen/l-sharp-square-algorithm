@@ -11,6 +11,7 @@ RUN apt-get update \
         python3.14-dev \
         openjdk-11-jdk \
         git \
+        nano \
     && rm -rf /var/lib/apt/lists/*
 
 # Create Python virtual environment.
@@ -26,7 +27,7 @@ RUN python -m pip install --upgrade pip \
         python-sat \
         numpy==2.5.3 \
         pandas==3.0.6 \
-        stopit==1.1.2 \
+        stopit==1.1.2
 
 # Download repo.
 RUN git clone \
@@ -124,6 +125,10 @@ RUN javac m199_Reach.java
 
 # Clone the L#-square repository.
 WORKDIR /
+
+# Changes on every build, so the git clone layer is never reused.
+ARG GIT_CACHE_BUST
+
 RUN git clone \
     https://github.com/JLaumen/l-sharp-square-algorithm.git \
     -b rers
