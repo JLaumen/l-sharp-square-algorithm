@@ -124,13 +124,10 @@ WORKDIR /Papers-2025-MODELS-Automata-Bug-Description/rers2019/IndReachabilityRer
 RUN javac m199_Reach.java
 
 # Clone the L#-square repository.
-ARG GIT_CACHE_BUST=1
-
 WORKDIR /
-RUN echo "Cache bust: ${GIT_CACHE_BUST}" \
-    && git clone \
-        https://github.com/JLaumen/l-sharp-square-algorithm.git \
-        -b rers
+RUN git clone \
+    https://github.com/JLaumen/l-sharp-square-algorithm.git \
+    -b rers
 
 # Merge L#-square into the RERS repository.
 RUN mv -f \

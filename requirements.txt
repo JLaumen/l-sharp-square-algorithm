@@ -1,3 +1,2 @@
 aalpy
-pysmt
-z3-solver
+python-sat

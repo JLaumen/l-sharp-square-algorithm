@@ -611,7 +611,7 @@ class ObservationTreeSquare:
         return hypothesis
 
     def _expand_frontier(self) -> None:
-        length = self.size - len(self.guaranteed_basis) + 3
+        length = 3
         basis_access_sequences = [self._get_access_sequence(node) for node in self.guaranteed_basis]
         for word in itertools.product(self.alphabet, repeat=length):
             word = list(word)
