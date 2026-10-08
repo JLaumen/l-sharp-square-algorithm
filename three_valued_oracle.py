@@ -75,13 +75,13 @@ class ThreeValuedEqOracle(Oracle):
     @staticmethod
     def _is_violation(spec_output: object, dfa_output: bool) -> bool:
         """Check whether the DFA output violates the 3DFA classification."""
-        if spec_output == TRUE:
+        if spec_output is TRUE:
             return dfa_output is not True
 
-        if spec_output == FALSE:
+        if spec_output is FALSE:
             return dfa_output is not False
 
-        if spec_output == DC:
+        if spec_output is DC:
             return False
 
         raise ValueError(f"Unexpected three-valued output: {spec_output!r}")
@@ -150,6 +150,7 @@ class ThreeValuedEqOracle(Oracle):
                     )
 
                 if self._is_violation(next_spec.output, next_output):
+                    print(f"Counterexample found: {next_word}, {next_spec.output} vs {next_output}")
                     return next_word
 
                 product_state = (next_spec, next_hyp)

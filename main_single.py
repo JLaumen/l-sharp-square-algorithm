@@ -10,6 +10,8 @@ from LSharpSquare import run_lsharp_square
 from Oracle import RandomWMethodEqOracle
 from system_dc_sul_s_t import SystemDCSULST
 from three_valued_oracle import ThreeValuedEqOracle
+from ThreeDFASul import ThreeDFASUL
+from DCValue import DCValue
 
 logging.basicConfig(level=logging.DEBUG, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 
@@ -27,7 +29,15 @@ def run(example, t_type, single):
     from mealy_to_3dfa import construct_3dfa_from_file
     dfa3 = construct_3dfa_from_file(model, sul, alphabet)
     print(dfa3)
+    print(len(dfa3.states))
+    with DCValue.strict_equality():
+        dfa3.minimize()
+    print(len(dfa3.states))
+    print(dfa3)
+    exit()
+
     oracle = ThreeValuedEqOracle(alphabet, dfa3)
+    sul = ThreeDFASUL(dfa3)
     dfa, data = run_lsharp_square(alphabet, sul, oracle, return_data=True)
 
     if not single:

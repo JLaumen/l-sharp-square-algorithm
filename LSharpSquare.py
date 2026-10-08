@@ -18,7 +18,7 @@ def _count_informative_nodes(node: Any) -> int:
 
 
 def run_lsharp_square(alphabet: list, sul: Any, eq_oracle: Oracle, return_data: bool = False,
-                      replace_basis: bool = True, assume_prefix_closed: bool = True, ) -> tuple | None:
+                      replace_basis: bool = False, assume_prefix_closed: bool = True, ) -> tuple | None:
     """Learn a DFA with the L#-square algorithm.
 
     The algorithm incrementally builds an observation tree from the incomplete
