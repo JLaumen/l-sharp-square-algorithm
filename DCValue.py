@@ -54,3 +54,17 @@ class DCValue(Enum):
             return True
 
         return self.value == other.value
+
+    def __hash__(self) -> int:
+        """Return a hash value for this instance.
+
+        The hash value is based on the underlying Boolean value for known
+        values, and is constant for don't-care values.
+
+        Returns:
+            An integer hash value.
+        """
+        if self.is_known():
+            return hash(self.value)
+
+        return 0

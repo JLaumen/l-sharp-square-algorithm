@@ -9,6 +9,7 @@ from rers_sul_s_t import RERSSULST
 from LSharpSquare import run_lsharp_square
 from Oracle import RandomWMethodEqOracle
 from system_dc_sul_s_t import SystemDCSULST
+from three_valued_oracle import ThreeValuedEqOracle
 
 logging.basicConfig(level=logging.DEBUG, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 
@@ -22,9 +23,11 @@ def run(example, t_type, single):
         RERSSULST(benchmark=example, t_type=t_type, for_T=False, is_prefix_closed=False, is_suffix_closed=False))
     alphabet = system_sul.sul.alphabet
     sul = SystemDCSULST(M, system_sul)
-    oracle = RandomWMethodEqOracle(alphabet, sul, counter_examples_dict[example][t_type], walks_per_state=900,
-                                   walk_len=30)
-
+    model = f"models/{example}.dot"
+    from mealy_to_3dfa import construct_3dfa_from_file
+    dfa3 = construct_3dfa_from_file(model, sul, alphabet)
+    print(dfa3)
+    oracle = ThreeValuedEqOracle(alphabet, dfa3)
     dfa, data = run_lsharp_square(alphabet, sul, oracle, return_data=True)
 
     if not single:
