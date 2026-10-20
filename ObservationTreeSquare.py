@@ -1,474 +1,511 @@
+"""SAT-based observation-tree learner for separating deterministic finite automata.
+
+Each call to :meth:`ObservationTreeSquare.build_hypothesis` runs one round:
+
+1. Make the observation tree adequate: expand the frontier below every basis
+   node, promote nodes that are apart from the whole basis, and query
+   distinguishing suffixes until frontier nodes are identified.
+2. Restrict, for every informative tree node, the hypothesis states it may
+   map to (its *mapping domain*), using basis compatibility, known outputs
+   and frontier/basis apartness.
+3. Encode "a DFA with ``size`` states into which the tree maps" as CNF
+   (:class:`~.DfaEncoding.DfaEncoding`) and solve it with CaDiCaL, steering the
+   search towards the previous hypothesis while the basis is unchanged. The
+   encoding and solver are kept while the state bound and basis are unchanged,
+   so each round only adds the clauses for new observations. If the CNF is
+   unsatisfiable the state bound is increased for the next round.
+
+``frontier_to_basis_dict`` maps non-basis nodes to the basis nodes they have
+not yet been shown to be apart from. Since apartness is monotone in the tree,
+each entry is a superset of the basis nodes the node is truly compatible with.
+Basis nodes never have an entry, so they are never treated as frontier nodes.
+"""
+
+from __future__ import annotations
+
 import itertools
 import logging
 import time
 from collections import deque
+from collections.abc import Iterable, Iterator, Sequence
+from typing import Any
 
 from aalpy.automata import Dfa, DfaState
-from pysmt.exceptions import SolverReturnedUnknownResultError
-from pysmt.shortcuts import (Solver, Symbol, Function, Int, Bool, Or, GE, LT)
-from pysmt.typing import INT, BOOL, FunctionType
+from pysat.solvers import Cadical195
 
 from Apartness import Apartness
-from MooreNode import MooreNode
+from DCNode import DCNode
+from DCValue import DCValue
+from DfaEncoding import DfaEncoding, Edge, HypothesisMapping
 
-test_cases_path = "Benchmarking/incomplete_dfa_benchmark/test_cases/"
-logging.basicConfig(level=logging.INFO, format=f"%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+logger = logging.getLogger(__name__)
+
+# Frontier expansion queries all words of the largest length whose count stays
+# below this bound after each basis node; see ``ObservationTreeSquare._expand_frontier``.
+_FRONTIER_EXPANSION_WORDS = 1000
+
+# CaDiCaL options for the hypothesis search: run in stable mode only (target phases and
+# reluctant restarts), which favours finding satisfying assignments.
+_SOLVER_OPTIONS = {"stabilizeonly": 1}
 
 
 class ObservationTreeSquare:
-    def __init__(self, alphabet, sul, solver_timeout, replace_basis, use_compatibility):
-        """
-        Initializes the observation tree with a root node.
-        """
+    """Learn a separating DFA from an incomplete observation tree.
+
+    The learner incrementally queries a system under learning (SUL), maintains
+    an apartness-aware basis, and encodes the resulting DFA construction as a
+    SAT problem.
+
+    Args:
+        alphabet: Input symbols understood by the SUL; assumed to contain at
+            least two symbols.
+        sul: System-under-learning object exposing a ``query`` method.
+        assume_prefix_closed: Whether an unknown output implies that longer
+            prefixes are also unknown.
+
+    Attributes:
+        automaton_type: The type of automaton produced, always ``"dfa"``.
+        alphabet: Input alphabet used by the learner.
+        sul: System under learning queried for observations.
+        assume_prefix_closed: Whether unknown outputs are treated as
+            prefix-closed.
+        solver_time: Accumulated time spent building and solving SAT
+            instances.
+        root: Root node of the observation tree.
+        size: Current DFA state bound.
+        guaranteed_basis: Current basis nodes that must remain represented.
+            Basis node ``i`` is hypothesis state ``i``. Only grows through
+            promotion, which keeps it in sync with an internal set.
+        frontier_to_basis_dict: Compatible basis candidates for each
+            non-basis observation-tree node.
+    """
+
+    def __init__(self, alphabet: Sequence[Any], sul: Any, assume_prefix_closed: bool = True) -> None:
         self.automaton_type = "dfa"
-        self.solver_timeout = solver_timeout * 1000
-        self.replace_basis = replace_basis
-        self.use_compatibility = use_compatibility
-
-        # Logger information
-        self.smt_time = 0
-        MooreNode._id_counter = 0
-
-        # Initialize tree
-        self.alphabet = alphabet
+        self.alphabet = list(alphabet)
         self.sul = sul
-        self.outputAlphabet = [True, False, "unknown"]
-        self.states_list = []
-
-        self.root = MooreNode()
-        self.root.set_output(self.sul.query([]))
-
+        self.assume_prefix_closed = assume_prefix_closed
+        self.solver_time = 0.0
+        DCNode._id_counter = 0
+        self.root = DCNode()
+        self.root.set_output(self.sul.query(()))
         self.size = 1
         self.guaranteed_basis = [self.root]
-        self.frontier_to_basis_dict = dict()
+        self._basis_set = {self.root}
+        self.frontier_to_basis_dict: dict[DCNode, set[DCNode]] = {}
+        self._alphabet_index = {letter: index for index, letter in enumerate(self.alphabet)}
+        # Frontier expansion is only needed after the state bound changes or
+        # after a new basis node is promoted.
+        self._last_expanded_state: tuple[int, int] | None = None
+        # The last hypothesis found and the basis size it was found for. While the basis is
+        # unchanged it provides the solver's decision phases, as the next hypothesis mostly
+        # differs from it only where the new observations contradict it.
+        self._last_hypothesis: tuple[int, HypothesisMapping] | None = None
+        # The encoding and solver of the current (state bound, basis size), reused across rounds.
+        self._sat_session: tuple[tuple[int, int], DfaEncoding, Cadical195] | None = None
 
-    def insert_observation(self, inputs, output):
+        logger.debug("Initialized learner: alphabet_size=%d, initial_output=%s, state_bound=%d",
+                     len(self.alphabet), self.root.output, self.size)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def build_hypothesis(self) -> Dfa | None:
+        """Build a DFA hypothesis from the current observations.
+
+        Returns:
+            A DFA consistent with the current observation tree, or ``None`` if
+            the current state bound is insufficient. When no hypothesis exists
+            at the current bound, the state bound is increased for the next
+            call.
         """
-        Insert an observation into the tree using a sequence of inputs and the corresponding output.
+        logger.debug("=== Building hypothesis: state_bound=%d, basis_size=%d ===", self.size,
+                     len(self.guaranteed_basis))
+
+        self._find_adequate_observation_tree()
+        hypothesis_mapping = self._find_hypothesis()
+        if hypothesis_mapping is None:
+            self.size += 1
+            logger.debug("No hypothesis at current bound; increasing state_bound to %d", self.size)
+            return None
+
+        transition_mapping, output_mapping = hypothesis_mapping
+        hypothesis = self._construct_hypothesis(transition_mapping, output_mapping)
+        logger.debug("Hypothesis constructed: states=%d, accepting_states=%d", len(output_mapping),
+                     sum(output_mapping))
+        return hypothesis
+
+    def process_counter_example(self, counterexample: Sequence[Any], output: bool | DCValue) -> None:
+        """Add a counterexample and its observed output to the tree.
+
+        Args:
+            counterexample: Input sequence that distinguishes the current
+                hypothesis from the SUL.
+            output: Observed output for the counterexample, given as a boolean
+                or as a ``DCValue``.
         """
-        node = self.root
-        for inp in inputs:
-            node = node.extend_and_get(inp, None)
+        logger.debug("Processing counterexample: length=%d, reported_output=%s", len(counterexample), output)
+
+        node, _ = self._observe(counterexample)
+        if isinstance(output, bool):
+            output = DCValue.TRUE if output else DCValue.FALSE
         node.set_output(output)
+        self._update_frontier_to_basis_dict()
 
-    def insert_observation_sequence(self, inputs, outputs):
-        """
-        Insert an observation into the tree using a sequence of inputs and their corresponding outputs.
+        logger.debug("Counterexample incorporated: final_output=%s, basis_size=%d, state_bound=%d", output,
+                     len(self.guaranteed_basis), self.size)
+
+    # ------------------------------------------------------------------
+    # Observation tree primitives
+    # ------------------------------------------------------------------
+
+    def _observe(self, inputs: Sequence[Any]) -> tuple[DCNode, bool]:
+        """Add ``inputs`` to the tree, querying the SUL for every missing prefix.
+
+        Every non-basis node on the path that has no candidate entry yet gets
+        the full basis as its candidates.
+
+        Returns:
+            The node reached by ``inputs`` and whether any newly queried
+            output was known. With ``assume_prefix_closed``, an unknown output
+            marks all missing longer prefixes as unknown without querying them.
         """
         node = self.root
-        for inp, output in zip(inputs, outputs):
-            node = node.extend_and_get(inp, output)
-            node.set_output(output)
-            if not node in self.frontier_to_basis_dict:
-                candidates = {candidate for candidate in self.guaranteed_basis}
-                self.frontier_to_basis_dict[node] = candidates
+        queried_known_output = False
+        rest_unknown = False
+        for index, input_value in enumerate(inputs):
+            successor = node.successors.get(input_value)
+            if successor is None:
+                if rest_unknown:
+                    output = DCValue.DC
+                else:
+                    output = self.sul.query(tuple(inputs[:index + 1]))
+                    if output.is_known():
+                        queried_known_output = True
+                    elif self.assume_prefix_closed:
+                        rest_unknown = True
+                successor = node.extend_and_get(input_value, output)
+            elif self.assume_prefix_closed and successor.output is DCValue.DC:
+                rest_unknown = True
+            node = successor
+            if node not in self.frontier_to_basis_dict and node not in self._basis_set:
+                self.frontier_to_basis_dict[node] = set(self.guaranteed_basis)
+        return node, queried_known_output
 
-    def experiment(self, inputs):
-        """
-        Perform an experiment by querying the SUL if necessary and updating the tree.
-        """
-        outputs, extended = self._get_output_sequence(inputs, query_mode='final')
-        self.insert_observation_sequence(inputs, outputs)
-        return outputs[-1]
-
-    def get_successor(self, inputs, start_node=None):
-        """
-        Retrieve the node corresponding to the given input sequence
-        """
-        if start_node is None:
-            node = self.root
-        else:
-            node = start_node
-        for input_val in inputs:
-            successor_node = node.get_successor(input_val)
-            if successor_node is None:
+    def _get_successor(self, inputs: Sequence[Any], start_node: DCNode | None = None) -> DCNode | None:
+        """Follow ``inputs`` from ``start_node`` (default: the root) without extending the tree."""
+        node = self.root if start_node is None else start_node
+        for input_value in inputs:
+            node = node.successors.get(input_value)
+            if node is None:
                 return None
-            node = successor_node
         return node
 
-    @staticmethod
-    def get_transfer_sequence(start_node, end_node):
-        """
-        Get the sequence of inputs that moves from the start node to the end node.
-        """
-        transfer_sequence = []
-        node = end_node
-
-        while node != start_node:
-            if node.parent is None:
-                return None
-            transfer_sequence.append(node.input_to_parent)
-            node = node.parent
-
-        transfer_sequence.reverse()
-        return transfer_sequence
-
-    def get_access_sequence(self, target_node):
-        """
-        Get the sequence of inputs that moves from the root node to the target node.
-        """
-        transfer_sequence = []
-        node = target_node
-
-        while node != self.root:
-            if node.parent is None:
-                return None
-            transfer_sequence.append(node.input_to_parent)
-            node = node.parent
-
-        transfer_sequence.reverse()
-        return transfer_sequence
-
-    def get_size(self):
-        """
-        Get the number of nodes in the observation tree.
-        """
-        return self.root.id_counter
-
-    @staticmethod
-    def is_known(node):
-        """
-        Check if the output of a node is known.
-        """
-        return node.output is not None and node.output != "unknown"
-
-    def count_informative_nodes(self):
-        """
-        counts how many nodes have informative information
-        """
-        queue = deque()
-        queue.append(self.root)
-        count = 0
+    def _iter_nodes(self) -> Iterator[DCNode]:
+        """Yield all observation-tree nodes in breadth-first order."""
+        queue = deque([self.root])
         while queue:
             node = queue.popleft()
-            if node.output != "unknown":
-                count += 1
-            for successor in node.successors.values():
-                queue.append(successor)
-        return count
+            queue.extend(node.successors.values())
+            yield node
 
-    def update_basis_candidates(self, frontier_node):
-        """
-        Update the basis candidates for a specific frontier node.
-        """
-        candidates = self.frontier_to_basis_dict[frontier_node]
-        new_candidates = {node for node in candidates if
-                          not Apartness.states_are_incompatible(frontier_node, node, self)}
-        self.frontier_to_basis_dict[frontier_node] = new_candidates
+    def _count_candidate_nodes(self) -> int:
+        """Count basis and informative nodes; only used for debug logging."""
+        return sum(1 for node in self._iter_nodes() if node in self._basis_set or node.leads_to_known)
 
-    def update_frontier_to_basis_dict(self):
-        """
-        Update the basis candidates for all frontier nodes.
-        """
-        self.update_frontier_to_basis_dict_dfs(self.root)
+    # ------------------------------------------------------------------
+    # Adequate observation tree
+    # ------------------------------------------------------------------
 
-    def update_frontier_to_basis_dict_dfs(self, node):
-        if not node.leads_to_known:
-            return
-        if not node in self.guaranteed_basis:
-            self.update_basis_candidates(node)
-            if len(self.frontier_to_basis_dict[node]) == 0:
-                return
-        for successor in node.successors.values():
-            self.update_frontier_to_basis_dict_dfs(successor)
+    def _find_adequate_observation_tree(self) -> None:
+        """Expand, promote and identify until no frontier node can be identified further."""
+        logger.debug("Searching for adequate observation tree: state_bound=%d, basis_size=%d", self.size,
+                     len(self.guaranteed_basis))
 
-    def promote_node_to_basis(self):
-        """
-        If an isolated frontier node is found, reset the queue and restart from the guaranteed basis plus the isolated node.
-        """
-        queue = deque([self.root])
-        while queue:
-            iso_frontier_node = queue.popleft()
-            for successor in iso_frontier_node.successors.values():
-                queue.append(successor)
-            if iso_frontier_node in self.guaranteed_basis:
-                continue
-            basis_list = self.frontier_to_basis_dict[iso_frontier_node]
-            if not basis_list:
-                self.guaranteed_basis.append(iso_frontier_node)
-                # Update the candidates
-                del self.frontier_to_basis_dict[iso_frontier_node]
-                for node, candidates in self.frontier_to_basis_dict.items():
-                    candidates.add(iso_frontier_node)
-                logging.debug(f"Increasing basis size to {len(self.guaranteed_basis)}")
-                self.size = max(self.size, len(self.guaranteed_basis))
-                return True
+        if (self.size, len(self.guaranteed_basis)) != self._last_expanded_state:
+            self._expand_frontier()
+        self._update_frontier_to_basis_dict()
 
-        if not self.replace_basis:
+        promotions = self._promote_and_expand()
+        identification_rounds = 0
+        while self._make_frontiers_identified():
+            identification_rounds += 1
+            self._update_frontier_to_basis_dict()
+            promotions += self._promote_and_expand()
+
+        logger.debug("Observation tree ready: basis_size=%d, promotions=%d, identification_rounds=%d",
+                     len(self.guaranteed_basis), promotions, identification_rounds)
+
+    def _expand_frontier(self) -> None:
+        """Query every word of a fixed length after each basis access sequence.
+
+        The length is the smallest ``n`` with ``|alphabet|^(n + 1) >= 1000``.
+        """
+        length = 0
+        while len(self.alphabet) ** (length + 1) < _FRONTIER_EXPANSION_WORDS:
+            length += 1
+        debug = logger.isEnabledFor(logging.DEBUG)
+        nodes_before = self._count_candidate_nodes() if debug else 0
+
+        basis_access_sequences = [node.access_sequence for node in self.guaranteed_basis]
+        for word in itertools.product(self.alphabet, repeat=length):
+            word = list(word)
+            for access_sequence in basis_access_sequences:
+                self._observe(access_sequence + word)
+
+        self._last_expanded_state = (self.size, len(self.guaranteed_basis))
+        if debug:
+            logger.debug("Expanded observation frontier: depth=%d, basis_size=%d, candidate_nodes=%d -> %d", length,
+                         len(self.guaranteed_basis), nodes_before, self._count_candidate_nodes())
+
+    def _promote_and_expand(self) -> int:
+        """Promote basis nodes until none is apart from the basis, expanding after each promotion.
+
+        Returns:
+            The number of promoted nodes.
+        """
+        promotions = 0
+        while self._promote_node_to_basis():
+            promotions += 1
+            # A newly promoted basis node changes the set of access sequences,
+            # so expand immediately after that basis change.
+            self._expand_frontier()
+            self._update_frontier_to_basis_dict()
+        return promotions
+
+    def _promote_node_to_basis(self) -> bool:
+        """Add the first node apart from the whole basis to it; ``False`` if there is none."""
+        next_basis_node = self._find_next_basis_node()
+        if next_basis_node is None:
             return False
 
-        queue = deque([self.root])
-        while queue:
-            iso_frontier_node = queue.popleft()
-            for successor in iso_frontier_node.successors.values():
-                queue.append(successor)
-            if iso_frontier_node in self.guaranteed_basis:
-                continue
-            basis_list = self.frontier_to_basis_dict[iso_frontier_node]
-            if len(basis_list) == 1:
-                candidate = next(iter(self.frontier_to_basis_dict[iso_frontier_node]))
-                if len(self.get_access_sequence(candidate)) <= len(self.get_access_sequence(iso_frontier_node)):
-                    continue
-                self.guaranteed_basis.remove(candidate)
-                self.guaranteed_basis.append(iso_frontier_node)
-                # Update the candidates
-                del self.frontier_to_basis_dict[iso_frontier_node]
-                for node, candidates in self.frontier_to_basis_dict.items():
-                    if candidate in candidates:
-                        candidates.remove(candidate)
-                    candidates.add(iso_frontier_node)
-                self.frontier_to_basis_dict[candidate] = {node for node in self.guaranteed_basis}
-                return True
-        return False
+        self.guaranteed_basis.append(next_basis_node)
+        self._basis_set.add(next_basis_node)
+        self.size = max(self.size, len(self.guaranteed_basis))
+        self._rebuild_frontier_to_basis_dict()
 
-    def make_frontiers_identified(self):
-        """
-        Loop over all frontier nodes to identify them
-        """
+        logger.debug("Promoted basis node: basis_size=%d, state_bound=%d, access_sequence=%s",
+                     len(self.guaranteed_basis), self.size, next_basis_node.access_sequence)
+        return True
+
+    def _find_next_basis_node(self) -> DCNode | None:
+        """Find the first observation-tree node, breadth-first, that is apart from the current basis."""
+        for candidate in self._iter_nodes():
+            if (candidate not in self._basis_set and candidate.leads_to_known
+                    and all(Apartness.states_are_apart(candidate, basis_node, self)
+                            for basis_node in self.guaranteed_basis)):
+                return candidate
+        return None
+
+    def _make_frontiers_identified(self) -> bool:
+        """Try to identify every non-basis successor of every basis node; ``True`` if the tree was extended."""
         extended = False
+        identified_frontiers = 0
         for basis_node in self.guaranteed_basis:
-            for letter in self.alphabet:
-                frontier_node = basis_node.get_successor(letter)
-                while self.identify_frontier(frontier_node):
+            for input_value in self.alphabet:
+                frontier_node = basis_node.successors.get(input_value)
+                if frontier_node is None or frontier_node in self._basis_set:
+                    continue
+                while self._identify_frontier(frontier_node):
                     extended = True
-                    self.update_basis_candidates(frontier_node)
+                    identified_frontiers += 1
+                    self._update_basis_candidates(frontier_node)
+
+        if identified_frontiers:
+            logger.debug("Identified frontier nodes: extensions=%d, basis_size=%d", identified_frontiers,
+                         len(self.guaranteed_basis))
         return extended
 
-    def identify_frontier(self, frontier_node):
-        """
-        Identify a specific frontier node
-        """
-        if len(self.frontier_to_basis_dict[frontier_node]) == 0:
+    def _identify_frontier(self, frontier_node: DCNode) -> bool:
+        """Query distinguishing suffixes of the frontier's candidates until one yields a known output."""
+        candidates = self.frontier_to_basis_dict.get(frontier_node)
+        if not candidates:
             return False
-
-        inputs_to_frontier = self.get_transfer_sequence(self.root, frontier_node)
-
-        witnesses = self._get_witnesses_bfs(frontier_node)
-        for witness_seq in witnesses:
-            inputs = inputs_to_frontier + witness_seq
-            outputs, extended = self._get_output_sequence(inputs, query_mode='final')
-            self.insert_observation_sequence(inputs, outputs)
+        # The generator walks the tree lazily while it is being extended below.
+        for witness_sequence in Apartness.get_distinguishing_sequences(list(candidates), self):
+            target = self._get_successor(witness_sequence, start_node=frontier_node)
+            if target is not None and target.output is not None:
+                continue
+            _, extended = self._observe(frontier_node.access_sequence + witness_sequence)
             if extended:
                 return True
         return False
 
-    def _get_witnesses_bfs(self, frontier_node):
-        """
-        Specifically identify frontier nodes using separating sequences
-        """
-        basis_candidates = self.frontier_to_basis_dict.get(frontier_node)
-        witnesses = Apartness.get_distinguishing_sequences(basis_candidates, self)
+    # ------------------------------------------------------------------
+    # Basis candidates
+    # ------------------------------------------------------------------
 
-        for witness_seq in witnesses:
-            leads_to_node = self.get_successor(witness_seq, start_node=frontier_node)
-            if leads_to_node is None or leads_to_node.output is None:
-                yield witness_seq
+    def _non_apart_basis_nodes(self, node: DCNode, basis: Iterable[DCNode]) -> set[DCNode]:
+        return {basis_node for basis_node in basis if not Apartness.states_are_apart(node, basis_node, self)}
 
-    def construct_hypothesis_states(self, output_mapping=None):
-        """
-        Construct the hypothesis states from the basis
-        """
-        self.states_list = [DfaState(f's{i}') for i in range(self.size)]
-        for i, dfa_state in enumerate(self.states_list):
-            dfa_state.is_accepting = output_mapping[i]
+    def _update_basis_candidates(self, frontier_node: DCNode) -> None:
+        """Drop the candidates of ``frontier_node`` that it is now apart from."""
+        candidates = self.frontier_to_basis_dict.get(frontier_node)
+        if candidates is not None:
+            self.frontier_to_basis_dict[frontier_node] = self._non_apart_basis_nodes(frontier_node, candidates)
 
-    def construct_hypothesis_transitions(self, transition_mapping=None):
-        """
-        Construct the hypothesis transitions using the transition_mapping and output_mapping.
-        """
-        for i, dfa_state in enumerate(self.states_list):
-            for j, letter in enumerate(self.alphabet):
-                dfa_state.transitions[letter] = self.states_list[transition_mapping[i][j]]
-
-    def construct_hypothesis(self, transition_mapping=None, output_mapping=None):
-        """
-        Constructs the hypothesis DFA from the transition and output mappings.
-        """
-        self.construct_hypothesis_states(output_mapping=output_mapping)
-        self.construct_hypothesis_transitions(transition_mapping=transition_mapping)
-
-        hypothesis = Dfa(self.states_list[0], self.states_list)
-        hypothesis.compute_prefixes()
-        hypothesis.characterization_set = hypothesis.compute_characterization_set(raise_warning=False)
-
-        return hypothesis
-
-    def find_hypothesis(self):
-        """
-        Find a hypothesis consistent with the observation tree, using the pySMT solver.
-        There are 2 free functions: "out" and "m" and 1 bound function "delta".
-        """
-        logging.debug(f"Trying to build hypothesis of size {self.size}")
-        logging.debug(f"Basis size: {len(self.guaranteed_basis)}, Frontier size: {len(self.frontier_to_basis_dict)}")
-        start_smt_time = time.time()
-
-        s = Solver(name="z3", solver_options={"timeout": self.solver_timeout})  # or another backend supported by pySMT
-
-        # Function declarations
-        delta = Symbol("delta", FunctionType(INT, [INT, INT]))  # δ: int × int → int
-        dfa_output = Symbol("dfa_output", FunctionType(BOOL, [INT]))  # dfa_output: int → bool
-        states_mapping = Symbol("states_mapping", FunctionType(INT, [INT]))  # states_mapping: int → int
-
-        # Flatten the tree to a list of nodes
-        queue = deque([self.root])
-        nodes = [self.root]
-
-        while queue:
-            node = queue.popleft()
-            idx = nodes.index(node)
-            for letter, successor in node.successors.items():
-                # Check if successor can reach a known node
-                if not successor.leads_to_known:
-                    continue
-                queue.append(successor)
-                s.add_assertion(Function(states_mapping, [Int(len(nodes))]).Equals(
-                    Function(delta, [Function(states_mapping, [Int(idx)]), Int(self.alphabet.index(letter))])))
-                nodes.append(successor)
-
-        # Basis nodes map to different states
-        for i, node in enumerate(self.guaranteed_basis):
-            s.add_assertion(Function(states_mapping, [Int(nodes.index(node))]).Equals(Int(i)))
-
-        # Force known outputs
-        for i, node in enumerate(nodes):
-            if self.is_known(node):
-                val = Bool(node.output)
-                s.add_assertion(Function(dfa_output, [Function(states_mapping, [Int(i)])]).Iff(val))
-
-        for node, candidates in self.frontier_to_basis_dict.items():
-            if node not in nodes:
+    def _update_frontier_to_basis_dict(self) -> None:
+        """Refresh candidates below the root, skipping subtrees of identified or uninformative nodes."""
+        stack = [self.root]
+        while stack:
+            node = stack.pop()
+            if not node.leads_to_known:
                 continue
-            s.add_assertion(
-                Or([Function(states_mapping, [Int(nodes.index(node))]).Equals(Int(self.guaranteed_basis.index(c))) for c
-                    in candidates] + [Function(states_mapping, [Int(nodes.index(node))]).Equals(Int(i)) for i in
-                                      range(len(self.guaranteed_basis), self.size)]))
+            if node not in self._basis_set:
+                self._update_basis_candidates(node)
+                if not self.frontier_to_basis_dict.get(node):
+                    continue
+            stack.extend(node.successors.values())
 
-        # Correct delta
-        for i in range(self.size):
-            for j in range(len(self.alphabet)):
-                d_ij = Function(delta, [Int(i), Int(j)])
-                s.add_assertion(GE(d_ij, Int(0)))
-                s.add_assertion(LT(d_ij, Int(self.size)))
+    def _rebuild_frontier_to_basis_dict(self) -> None:
+        """Recompute the candidates of every non-basis node against the whole basis."""
+        self.frontier_to_basis_dict = {node: self._non_apart_basis_nodes(node, self.guaranteed_basis)
+                                       for node in self._iter_nodes() if node not in self._basis_set}
 
+    # ------------------------------------------------------------------
+    # Hypothesis construction
+    # ------------------------------------------------------------------
+
+    def _find_hypothesis(self) -> HypothesisMapping | None:
+        """Search for a DFA with ``self.size`` states consistent with the tree; ``None`` if there is none."""
+        start_time = time.perf_counter()
         try:
-            logging.debug("Solving...")
-            if not s.solve():
-                logging.debug("UNSAT")
-                logging.debug(f"No hypothesis of size {self.size} exists")
-                self.smt_time += time.time() - start_smt_time
-                return None, None
-            else:
-                logging.debug("SAT")
-                self.smt_time += time.time() - start_smt_time
-                model = s.get_model()
+            nodes, edges = self._flatten_observation_tree()
+            logger.debug("Building SAT hypothesis: state_bound=%d, basis_size=%d, observation_nodes=%d, edges=%d",
+                         self.size, len(self.guaranteed_basis), len(nodes), len(edges))
 
-                transition_mapping = [[0 for _ in range(len(self.alphabet))] for _ in range(self.size)]
-                output_mapping = [False for _ in range(self.size)]
-
-                for i in range(self.size):
-                    val = model.get_value(Function(dfa_output, [Int(i)]))
-                    output_mapping[i] = str(val) == "True"
-                    for j in range(len(self.alphabet)):
-                        val = model.get_value(Function(delta, [Int(i), Int(j)]))
-                        transition_mapping[i][j] = int(str(val))
-
-                return transition_mapping, output_mapping
-        except SolverReturnedUnknownResultError:
-            self.smt_time += time.time() - start_smt_time
-            logging.debug("TIMEOUT")
-            logging.debug(f"Could not find hypothesis of size {self.size}")
-            return None, None
-
-    def build_hypothesis(self):
-        """
-        Builds the hypothesis which will be sent to the SUL and checks consistency
-        """
-        while True:
-            self.find_adequate_observation_tree()
-            transition_mapping, output_mapping = self.find_hypothesis()
-            if transition_mapping is not None:
-                hypothesis = self.construct_hypothesis(transition_mapping=transition_mapping,
-                                                       output_mapping=output_mapping)
-                return hypothesis
-            else:
-                self.size += 1
+            mapping_domains = self._compute_mapping_domains(nodes)
+            empty_mapping_domains = sum(not domain for domain in mapping_domains)
+            if empty_mapping_domains:
+                logger.debug("SAT setup rejected: %d observation nodes have empty mapping domains",
+                             empty_mapping_domains)
+                self._close_sat_session()
+                return None
+            if not self._prepare_sat_domains(nodes, mapping_domains):
+                logger.debug("SAT setup rejected while applying output/apartness constraints")
+                self._close_sat_session()
                 return None
 
-    def expand_frontier(self):
-        """
-        Extend the frontier self.size - len(self.guaranteed_basis) steps from the guaranteed basis
-        """
-        length = self.size - len(self.guaranteed_basis) + 3
-        # length = 2
-        # Loop over words of length 'length'
-        for word in itertools.product(self.alphabet, repeat=length):
-            for node in self.guaranteed_basis:
-                access = self.get_access_sequence(node)
-                inputs = access + list(word)
-                outputs, _ = self._get_output_sequence(inputs, query_mode="full")
-                self.insert_observation_sequence(inputs, outputs)
+            encoding, solver = self._get_sat_session()
+            new_clauses = encoding.add_observations(nodes, edges, mapping_domains)
+            solver.append_formula(new_clauses)
+            logger.debug("SAT instance ready: variables=%d, new_clauses=%d", encoding.num_vars, len(new_clauses))
+            if self._last_hypothesis is not None and self._last_hypothesis[0] == len(self.guaranteed_basis):
+                # Phases only steer the search, so the outcome is the same with or without them.
+                solver.set_phases(encoding.phases(self._last_hypothesis[1]))
+            result = solver.solve()
+            if result is False:
+                logger.debug("SAT solver: UNSAT (elapsed=%.3fs)", time.perf_counter() - start_time)
+                self._close_sat_session()
+                return None
+            if result is not True:
+                raise RuntimeError(f"Unexpected CaDiCaL result: {result!r}.")
 
-    def update_frontier(self):
-        self.update_frontier_to_basis_dict()
+            logger.debug("SAT solver: SAT (elapsed=%.3fs)", time.perf_counter() - start_time)
+            hypothesis_mapping = encoding.decode(solver.get_model())
+            self._last_hypothesis = (len(self.guaranteed_basis), hypothesis_mapping)
+            return hypothesis_mapping
+        finally:
+            elapsed = time.perf_counter() - start_time
+            self.solver_time += elapsed
+            logger.debug("Hypothesis search finished: elapsed=%.3fs, cumulative_solver_time=%.3fs", elapsed,
+                         self.solver_time)
 
-    def find_adequate_observation_tree(self):
-        """
-        Tries to find an observation tree,
-        for which each frontier state is identified as much as possible.
-        """
-        self.expand_frontier()
-        self.update_frontier_to_basis_dict()
-        while self.promote_node_to_basis():
-            self.expand_frontier()
-            self.update_frontier_to_basis_dict()
+    def _get_sat_session(self) -> tuple[DfaEncoding, Cadical195]:
+        """Return the encoding and solver for the current state bound and basis, creating them if needed."""
+        key = (self.size, len(self.guaranteed_basis))
+        if self._sat_session is None or self._sat_session[0] != key:
+            self._close_sat_session()
+            solver = Cadical195()
+            solver.configure(_SOLVER_OPTIONS)  # Options must be set before any clause is added.
+            self._sat_session = (key, DfaEncoding(self.size, len(self.guaranteed_basis), len(self.alphabet)), solver)
+        return self._sat_session[1], self._sat_session[2]
 
-        while self.make_frontiers_identified():
-            self.update_frontier_to_basis_dict()
-            while self.promote_node_to_basis():
-                self.expand_frontier()
-                self.update_frontier_to_basis_dict()
+    def _close_sat_session(self) -> None:
+        """Release the solver of the current session; the next search starts a new one."""
+        if self._sat_session is not None:
+            self._sat_session[2].delete()
+            self._sat_session = None
 
-    def process_counter_example(self, cex_inputs, output):
-        """
-        Inserts the counter example into the observation tree and searches for the
-        input-output sequence which is different
-        """
-        cex_outputs, _ = self._get_output_sequence(cex_inputs, query_mode="full")
-        self.insert_observation_sequence(cex_inputs, cex_outputs)
-        self.get_successor(cex_inputs).set_output(output)
-        self.update_frontier_to_basis_dict()
-        return
+    def _flatten_observation_tree(self) -> tuple[list[DCNode], list[Edge]]:
+        """Index the root and all informative nodes breadth-first, with the edges between them."""
+        nodes = [self.root]
+        edges: list[Edge] = []
+        for source_index, node in enumerate(nodes):  # ``nodes`` grows while iterating: a BFS queue.
+            for input_value, successor in node.successors.items():
+                if successor.leads_to_known:
+                    edges.append((source_index, len(nodes), self._alphabet_index[input_value]))
+                    nodes.append(successor)
+        return nodes, edges
 
-    def _get_output_sequence(self, inputs, query_mode="full"):
-        """
-        Returns the sequence of outputs corresponding to the input path.
-        The knowledge is obtained from the observation tree or if not available via querying the sul.
-        There are 3 query_modes: full, none and final. They allow you to restrict the querying to your needs
-        """
-        assert query_mode in ["full", "none", "final"]
-
-        outputs = []
-        queried = False
-        current_node = self.root
-        for inp_num in range(len(inputs)):
-            inp = inputs[inp_num]
-            if current_node is not None:
-                current_node = current_node.get_successor(inp)
-            if current_node is None:
-                if query_mode == "full" or (inp_num == len(inputs) - 1 and query_mode == "final"):
-                    new_output = self.sul.query(inputs[:inp_num + 1])
-                    outputs.append(new_output)
-                    if new_output != "unknown":
-                        queried = True
-                else:
-                    outputs.append(None)
+    def _compute_mapping_domains(self, nodes: Sequence[DCNode]) -> list[set[int]]:
+        """States each node may map to: its own state for basis nodes, else compatible basis or free states."""
+        basis_index = {basis_node: state for state, basis_node in enumerate(self.guaranteed_basis)}
+        all_states = range(self.size)
+        free_states = range(len(self.guaranteed_basis), self.size)
+        domains: list[set[int]] = []
+        for node in nodes:
+            if node in basis_index:
+                domains.append({basis_index[node]})
+                continue
+            candidates = self.frontier_to_basis_dict.get(node)
+            if candidates is None:
+                domains.append(set(all_states))
             else:
-                if current_node.output is None and (
-                        query_mode == "full" or (inp_num == len(inputs) - 1 and query_mode == "final")):
-                    new_output = self.sul.query(inputs[:inp_num + 1])
-                    outputs.append(new_output)
-                    if new_output != "unknown":
-                        queried = True
-                else:
-                    outputs.append(current_node.output)
-        return outputs, queried
+                domains.append({basis_index[candidate] for candidate in candidates}.union(free_states))
+        return domains
+
+    def _prepare_sat_domains(self, nodes: Sequence[DCNode], mapping_domains: list[set[int]]) -> bool:
+        """Prune domains by forced state outputs and frontier/basis apartness; ``False`` if one becomes empty."""
+        known_nodes = [(index, node.output is DCValue.TRUE) for index, node in enumerate(nodes)
+                       if node.has_known_output()]
+
+        # Known nodes with a singleton domain fix the output of their state.
+        forced_output: list[bool | None] = [None] * self.size
+        for node_index, accepts in known_nodes:
+            domain = mapping_domains[node_index]
+            if len(domain) != 1:
+                continue
+            state = next(iter(domain))
+            if forced_output[state] is not None and forced_output[state] != accepts:
+                return False
+            forced_output[state] = accepts
+
+        for node_index, accepts in known_nodes:
+            domain = mapping_domains[node_index]
+            domain.difference_update([state for state in domain
+                                      if forced_output[state] is not None and forced_output[state] != accepts])
+            if not domain:
+                return False
+
+        # Only apartness between frontier nodes and basis nodes is needed here.
+        # Basis nodes are already mutually apart, and arbitrary observation-node
+        # pairs needlessly create an O(n^2) Cartesian product. A basis node's
+        # domain is the singleton holding its own state.
+        node_index = {node: index for index, node in enumerate(nodes)}
+        basis_states = [(state, basis_node) for state, basis_node in enumerate(self.guaranteed_basis)
+                        if basis_node in node_index]
+        for index, node in enumerate(nodes):
+            if node not in self.frontier_to_basis_dict:  # Basis nodes have no entry.
+                continue
+            frontier_domain = mapping_domains[index]
+            for state, basis_node in basis_states:
+                if state in frontier_domain and Apartness.states_are_apart(node, basis_node, self):
+                    frontier_domain.discard(state)
+                    if not frontier_domain:
+                        return False
+        return True
+
+    def _construct_hypothesis(self, transition_mapping: Sequence[Sequence[int]],
+                              output_mapping: Sequence[bool]) -> Dfa:
+        """Build an AALpy DFA with states ``s0 .. s{size-1}``, starting in ``s0``."""
+        states = [DfaState(f"s{index}") for index in range(self.size)]
+        for state, accepting, targets in zip(states, output_mapping, transition_mapping):
+            state.is_accepting = accepting
+            for input_value, target_index in zip(self.alphabet, targets):
+                state.transitions[input_value] = states[target_index]
+        hypothesis = Dfa(states[0], states)
+        hypothesis.compute_prefixes()
+        hypothesis.characterization_set = hypothesis.compute_characterization_set(raise_warning=False)
+        return hypothesis

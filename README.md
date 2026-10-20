@@ -11,22 +11,13 @@ Frits Vaandrager
 
 ## Setup
 
-To run the Oliveira benchmarks, first build the Docker image (from the main branch):
+The Oliveira benchmarks run from the main branch and require Python 3.10 or newer.
+Create a virtual environment in the repository and install the dependencies:
 
 ```bash
-docker build -t l-sharp-square-oliveira .
-```
-
-Alternatively, pull the Docker image from Docker Hub:
-
-```bash
-docker pull jlaumen/l-sharp-square-oliveira
-```
-
-Run the Docker image:
-
-```bash
-docker run -it --rm l-sharp-square-oliveira
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ---
@@ -36,7 +27,7 @@ docker run -it --rm l-sharp-square-oliveira
 To run the complete benchmark as in the paper:
 
 ```bash
-python3 run_benchmarks.py -r
+python3 run_benchmarks.py
 ```
 
 The results will be saved in:
@@ -46,6 +37,21 @@ benchmarking/results
 ```
 
 Note: this may take a long time (up to a full day).
+
+---
+
+## Analysing the Results
+
+To summarise a results file and plot the results:
+
+```bash
+python3 analyze_results.py benchmarking/results/benchmark_t200_all.csv
+```
+
+Without an argument, the newest file in `benchmarking/results` is used.
+This prints the number of solved test cases, statistics per number of states of the target DFA, and the unsolved test
+cases. Plots of the solved test cases, running time, membership queries and validity queries are saved as PNG files in
+`benchmarking/plots/<results file name>/`.
 
 ---
 
@@ -67,8 +73,8 @@ These examples should finish within approximately one minute.
 
 You can use the following optional arguments:
 
-- `-c`  
-  Replace the apartness check with compatibility.
+- `-t [SECONDS]`  
+  Timeout per test case (default: 200 seconds).
 
 - `-j [THREADS]`  
   Run multiple test cases in parallel using multiple threads.
