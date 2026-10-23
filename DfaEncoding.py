@@ -1,8 +1,7 @@
-"""Incremental CNF encoding of "a DFA with a given number of states into which the observation tree maps"."""
+"""CNF encoding of "a DFA with a given number of states into which the observation tree maps"."""
 
 from __future__ import annotations
 
-import itertools
 from collections.abc import Iterable, Sequence
 
 from DCNode import DCNode
@@ -61,17 +60,11 @@ class CnfBuilder:
 
 
 class DfaEncoding:
-    """Incremental CNF for a DFA with ``number_of_states`` states into which the observation tree maps.
-
-    One encoding serves every hypothesis search for a fixed state bound and basis. Each call of
-    :meth:`add_observations` returns only the clauses for what is new since the previous call, so a
-    solver that keeps all returned clauses also keeps what it learned. This is sound because the
-    tree only grows: known outputs never change and mapping domains only shrink.
+    """CNF for a DFA with ``number_of_states`` states into which the observation tree maps.
 
     Variables:
 
-    * ``map(u, s)``: tree node ``u`` maps to state ``s``, for ``s`` in the mapping domain of ``u``
-      when ``u`` was added;
+    * ``map(u, s)``: tree node ``u`` maps to state ``s``, for ``s`` in the mapping domain of ``u``;
     * ``delta(s, a, t)``: the ``a``-transition of ``s`` goes to ``t``, for every state ``t``;
     * ``accepting(s)``: state ``s`` is accepting;
     * auxiliary variables of the at-most-one, output-signature and symmetry-breaking constraints.
@@ -80,9 +73,8 @@ class DfaEncoding:
     by value precedence: a node may only map to such a state ``s`` if an earlier node maps to
     ``s - 1``. Any consistent DFA can be renumbered this way, by numbering its non-basis states in
     the order of the first node mapping to them and putting states no node maps to last, so
-    satisfiability is unchanged. Nodes are ordered as they were added; the first call adds them by
-    decreasing number of nodes they are apart from, since the earliest nodes restrict the search
-    the most.
+    satisfiability is unchanged. Nodes are ordered by decreasing number of nodes they are apart
+    from, since the earliest nodes restrict the search the most.
 
     Args:
         number_of_states: Number of hypothesis states.
@@ -103,85 +95,56 @@ class DfaEncoding:
             for transition in row:
                 self._cnf.exactly_one(list(transition.values()))
 
-        # Encoded nodes in precedence order and with parents before children, with their variables,
-        # the states excluded since, and their parent as (node, letter index).
-        self._nodes: list[DCNode] = []
-        self._tree_order: list[DCNode] = []
+        # Variables of the encoded nodes and their parent as (node, letter index).
         self.mapping_variables: dict[DCNode, dict[int, int]] = {}
-        self._excluded: dict[DCNode, set[int]] = {}
         self._parents: dict[DCNode, tuple[DCNode, int]] = {}
-        self._known_nodes: set[DCNode] = set()
 
         # Suffixes form a trie of reversed words: suffix ``i`` is ``letter + suffixes[rest]``, with
         # ``rest == -1`` for the empty word. Per suffix: (ancestor, sign) for every known node
         # ``ancestor + suffix``, the masks of states that accepting and rejecting such ancestors may
         # map to, and the signature variable of each state.
         self._suffix_index: dict[tuple[int, int], int] = {}
-        self._suffixes: list[tuple[int, int]] = []
         self._occurrences: list[list[tuple[DCNode, int]]] = []
         self._sign_masks: list[list[int]] = []
         self._signatures: list[dict[int, int]] = []
 
-        # Per non-basis state: the literal for "some node added so far maps to it", and every such
-        # literal as (variable, state, position of the node that extended it).
+        # Per non-basis state: the literal for "some node added so far maps to it".
         self._used: dict[int, int] = {}
-        self._used_variables: list[tuple[int, int, int]] = []
 
     @property
     def num_vars(self) -> int:
         return self._cnf.num_vars
 
-    def add_observations(self, nodes: Sequence[DCNode], edges: Sequence[Edge],
-                         mapping_domains: Sequence[set[int]]) -> list[list[int]]:
-        """Encode the informative tree and return the clauses not returned before.
+    def encode_observations(self, nodes: Sequence[DCNode], edges: Sequence[Edge],
+                            mapping_domains: Sequence[set[int]]) -> list[list[int]]:
+        """Encode the informative tree and return the clauses.
 
         Args:
-            nodes: Informative tree nodes in breadth-first order; node ``0`` is the root. They must
-                include every node added before.
+            nodes: Informative tree nodes in breadth-first order; node ``0`` is the root.
             edges: Tree edges between ``nodes``, each listed after the edge into its source.
-            mapping_domains: Allowed states for each node. For a node added before, states outside
-                its domain at that time are ignored.
+            mapping_domains: Allowed states for each node.
 
         Returns:
-            The new clauses.
+            All clauses of the encoding.
         """
         parents: list[tuple[int, int] | None] = [None] * len(nodes)
         for source_index, target_index, letter_index in edges:
             parents[target_index] = (source_index, letter_index)
+            self._parents[nodes[target_index]] = (nodes[source_index], letter_index)
 
-        new_indices: list[int] = []
-        for node_index, (node, domain) in enumerate(zip(nodes, mapping_domains)):
-            mapping = self.mapping_variables.get(node)
-            if mapping is None:
-                new_indices.append(node_index)
-                parent = parents[node_index]
-                if parent is not None:
-                    self._parents[node] = (nodes[parent[0]], parent[1])
-            else:
-                excluded = self._excluded[node]
-                for state in mapping.keys() - domain - excluded:
-                    excluded.add(state)
-                    self._cnf.clauses.append([-mapping[state]])
-
-        self._tree_order.extend(nodes[node_index] for node_index in new_indices)
-        if not self._nodes:
-            degrees = _apartness_degrees(nodes, parents)
-            new_indices.sort(key=lambda node_index: -degrees[node_index])  # Stable: ties stay breadth-first.
-        for node_index in new_indices:
+        degrees = _apartness_degrees(nodes, parents)
+        order = sorted(range(len(nodes)), key=lambda node_index: -degrees[node_index])  # Stable: ties stay BFS.
+        for node_index in order:
             self._add_node(nodes[node_index], mapping_domains[node_index])
-        for node_index in new_indices:
-            self._encode_functional_simulation(nodes[node_index])
-
-        new_known: list[tuple[DCNode, int]] = []
         for node in nodes:
-            if node not in self._known_nodes and node.has_known_output():
-                self._known_nodes.add(node)
-                new_known.append((node, 1 if node.output is DCValue.TRUE else -1))
+            self._encode_functional_simulation(node)
+
+        known = [(node, 1 if node.output is DCValue.TRUE else -1) for node in nodes if node.has_known_output()]
         output_variables = self.output_variables
-        for node, sign in new_known:
+        for node, sign in known:
             self._cnf.clauses.extend([-mapping_literal, sign * output_variables[state]]
                                      for state, mapping_literal in self.mapping_variables[node].items())
-        self._encode_output_signatures(new_known)
+        self._encode_output_signatures(known)
         return self._cnf.take_clauses()
 
     def _add_node(self, node: DCNode, domain: set[int]) -> None:
@@ -190,12 +153,9 @@ class DfaEncoding:
         clauses = cnf.clauses
         mapping = {state: cnf.new_var() for state in sorted(domain)}
         self.mapping_variables[node] = mapping
-        self._excluded[node] = set()
         cnf.exactly_one(list(mapping.values()))
 
         # Value precedence: map(u, s) -> some earlier node maps to s - 1, for non-basis states.
-        position = len(self._nodes)
-        self._nodes.append(node)
         used = self._used
         for state, literal in mapping.items():
             if state <= self.basis_size:
@@ -210,7 +170,6 @@ class DfaEncoding:
                 used[state] = literal
             else:
                 current = used[state] = cnf.new_var()
-                self._used_variables.append((current, state, position))
                 clauses.append([-literal, current])
                 clauses.append([-previous, current])
                 clauses.append([-current, previous, literal])
@@ -231,7 +190,7 @@ class DfaEncoding:
                                      for target_state, transition_literal
                                      in self.transition_variables[source_state][letter_index].items())
 
-    def _encode_output_signatures(self, new_known: Iterable[tuple[DCNode, int]]) -> None:
+    def _encode_output_signatures(self, known: Iterable[tuple[DCNode, int]]) -> None:
         """Redundant: map(u, s) -> sig(s, w) == output(uw) for every node ``uw`` with a known output.
 
         ``sig(s, w)`` is the output of state ``s`` after the non-empty suffix ``w``; ``accepting(s)``
@@ -246,7 +205,7 @@ class DfaEncoding:
         cnf = self._cnf
         clauses = cnf.clauses
         touched: set[int] = set()
-        for node, sign in new_known:
+        for node, sign in known:
             suffix = -1  # The empty suffix.
             parent = self._parents.get(node)
             while parent is not None:
@@ -254,8 +213,7 @@ class DfaEncoding:
                 key = (letter, suffix)
                 next_suffix = self._suffix_index.get(key)
                 if next_suffix is None:
-                    next_suffix = self._suffix_index[key] = len(self._suffixes)
-                    self._suffixes.append(key)
+                    next_suffix = self._suffix_index[key] = len(self._suffix_index)
                     self._occurrences.append([])
                     self._sign_masks.append([0, 0])
                     self._signatures.append({})
@@ -279,61 +237,6 @@ class DfaEncoding:
             for ancestor, sign in self._occurrences[suffix]:
                 mapping = self.mapping_variables[ancestor]
                 clauses.extend([-mapping[state], sign * signature[state]] for state in new_states if state in mapping)
-
-    def phases(self, hint: HypothesisMapping) -> list[int]:
-        """Literals describing ``hint``, a DFA over the first ``len(hint[0])`` states, as solver phases.
-
-        The non-basis states of ``hint`` are first renumbered by value precedence. Mapping,
-        signature and precedence variables then follow the run of ``hint`` on the tree; variables of
-        states beyond the hint, and transitions into them, are set to false.
-        """
-        transition_mapping, output_mapping = hint
-        hinted_states = len(transition_mapping)
-        run: dict[DCNode, int] = {}
-        for node in self._tree_order:
-            parent = self._parents.get(node)
-            run[node] = 0 if parent is None else transition_mapping[run[parent[0]]][parent[1]]
-
-        renumbering = list(range(hinted_states))
-        next_state = self.basis_size
-        renumbered = set(range(self.basis_size))
-        for state in itertools.chain((run[node] for node in self._nodes), range(hinted_states)):
-            if state not in renumbered:
-                renumbered.add(state)
-                renumbering[state] = next_state
-                next_state += 1
-        transitions: list[list[int]] = [[]] * hinted_states
-        outputs: list[bool] = [False] * hinted_states
-        for state in range(hinted_states):
-            transitions[renumbering[state]] = [renumbering[target] for target in transition_mapping[state]]
-            outputs[renumbering[state]] = output_mapping[state]
-
-        literals: list[int] = []
-        for state, row in enumerate(self.transition_variables):
-            for letter, transition in enumerate(row):
-                target = transitions[state][letter] if state < hinted_states else None
-                literals.extend(literal if successor == target else -literal
-                                for successor, literal in transition.items())
-        literals.extend(literal if state < hinted_states and outputs[state] else -literal
-                        for state, literal in enumerate(self.output_variables))
-
-        first_use: dict[int, int] = {}
-        for position, node in enumerate(self._nodes):
-            state = renumbering[run[node]]
-            first_use.setdefault(state, position)
-            literals.extend(literal if candidate == state else -literal
-                            for candidate, literal in self.mapping_variables[node].items())
-        literals.extend(variable if first_use.get(state, position + 1) <= position else -variable
-                        for variable, state, position in self._used_variables)
-
-        # Output of every hinted state after every suffix, in suffix order (rest suffixes come first).
-        suffix_outputs: list[list[bool]] = []
-        for (letter, rest), signature in zip(self._suffixes, self._signatures):
-            rest_outputs = outputs if rest < 0 else suffix_outputs[rest]
-            suffix_outputs.append([rest_outputs[transitions[state][letter]] for state in range(hinted_states)])
-            literals.extend(variable if suffix_outputs[-1][state] else -variable
-                            for state, variable in signature.items() if state < hinted_states)
-        return literals
 
     def decode(self, model: Iterable[int]) -> HypothesisMapping:
         """Read the transition targets and accepting states from a satisfying assignment."""

@@ -79,6 +79,15 @@ You can use the following optional arguments:
 - `-j [THREADS]`  
   Run multiple test cases in parallel using multiple threads.
 
+- `-a {lsharp,dfaminer}`  
+  Algorithm to run (default: `lsharp`). `dfaminer` runs [DFAMiner](https://github.com/liyong31/DFAMiner) on the same
+  test cases, each in its own process that is killed on timeout, so it also works with `-j`. Results are written to
+  `benchmark_dfaminer_t<timeout>_all.csv`; the node counts, which DFAMiner does not report, are left empty.
+
+- `--dfaminer-path [DIRECTORY]`  
+  Directory of the DFAMiner repository (default: `../DFAMiner`). Its requirements (`python-sat`) must be installed in
+  the Python environment running the benchmarks.
+
 Using `-j` can significantly reduce the total runtime of the full benchmark, but may affect the runtime of individual test cases depending on available system resources.
 
 ---

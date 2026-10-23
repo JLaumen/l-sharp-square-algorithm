@@ -1,9 +1,10 @@
 """Summarise and plot a results file written by run_benchmarks.py.
 
-Test cases are grouped by the number of states of their target DFA (``randmNN``). This prints how
-many test cases were solved and, per group, statistics over the solved ones. It saves plots of the
-solved test cases, the running time, the membership queries and the validity queries per group as
-PNG files in ``benchmarking/plots/<results file name>/``.
+Test cases are grouped by the number of states of their target DFA (``randmNN`` in the Oliveira
+benchmarks, ``resNN-k`` in the DFAMiner benchmarks). This prints how many test cases were solved and,
+per group, statistics over the solved ones. It saves plots of the solved test cases and the running
+time per group as PNG
+files in ``benchmarking/plots/<results file name>/``.
 
 Usage:
     python3 analyze_results.py                                            # newest results file
@@ -30,8 +31,6 @@ INK, MUTED, GRID, AXIS = "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 # Plotted metrics: file name, Result attribute, title and whether the axis is logarithmic.
 METRIC_PLOTS = [
     ("time", "total_time", "Running time (s)", True),
-    ("membership_queries", "membership_queries", "Membership queries", False),
-    ("validity_queries", "validity_queries", "Validity queries", False),
 ]
 
 
@@ -41,8 +40,6 @@ class Result:
     states: int
     solved: bool
     total_time: float | None
-    membership_queries: int | None
-    validity_queries: int | None
     automaton_size: int | None
 
 
@@ -54,15 +51,13 @@ def load_results(path: str) -> list[Result]:
     results = []
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
-            match = re.search(r"randm(\d+)", row["file name"])
+            match = re.search(r"randm(\d+)|/res(\d+)-", row["file name"])
             if match is None:
                 raise ValueError(f"Cannot determine the number of states of {row['file name']}")
             automaton_size = _number(row["automaton_size"], int)
-            results.append(Result(test_case=row["file name"], states=int(match.group(1)),
+            results.append(Result(test_case=row["file name"], states=int(match.group(1) or match.group(2)),
                                   solved=row["succeeded"] == "True" and bool(automaton_size),
                                   total_time=_number(row["total_time"]),
-                                  membership_queries=_number(row["queries_learning"], int),
-                                  validity_queries=_number(row["validity_query"], int),
                                   automaton_size=automaton_size))
     return results
 
@@ -100,8 +95,7 @@ def print_summary(path: str, results: list[Result]) -> None:
               f"{statistics.median(times):.2f}s median, {max(times):.2f}s max")
     print()
 
-    header = ["states", "solved", "mean time (s)", "median time (s)", "max time (s)", "mean MQ", "mean EQ",
-              "mean size"]
+    header = ["states", "solved", "mean time (s)", "median time (s)", "max time (s)", "mean size"]
     rows = []
     for states, group in [*group_by_states(results).items(), ("all", results)]:
         group_solved = [result for result in group if result.solved]
@@ -109,13 +103,11 @@ def print_summary(path: str, results: list[Result]) -> None:
                      _mean(result.total_time for result in group_solved),
                      _median(result.total_time for result in group_solved),
                      _max(result.total_time for result in group_solved),
-                     _mean(result.membership_queries for result in group_solved),
-                     _mean(result.validity_queries for result in group_solved),
                      _mean(result.automaton_size for result in group_solved)])
     widths = [max(len(row[column]) for row in [header, *rows]) for column in range(len(header))]
     for row in [header, *rows]:
         print("  ".join(cell.rjust(width) for cell, width in zip(row, widths)))
-    print("(MQ: membership queries, EQ: validity queries; averages over the solved test cases)")
+    print("(statistics over the solved test cases)")
 
     if unsolved:
         print()
