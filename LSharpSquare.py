@@ -7,20 +7,7 @@ from typing import Any
 
 from aalpy.automata import Dfa
 
-from DCNode import DCNode
 from ObservationTreeSquare import ObservationTreeSquare
-
-
-def _count_nodes(root: DCNode) -> tuple[int, int]:
-    """Count all nodes and the nodes leading to a known observation in the tree rooted at ``root``."""
-    nodes = informative_nodes = 0
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        nodes += 1
-        informative_nodes += node.leads_to_known
-        stack.extend(node.successors.values())
-    return nodes, informative_nodes
 
 
 def run_lsharp_square(alphabet: list, words: list[tuple[tuple[Any, ...], bool]],
@@ -53,7 +40,6 @@ def run_lsharp_square(alphabet: list, words: list[tuple[tuple[Any, ...], bool]],
 
     total_time = time.time() - start_time
     solver_time = observation_tree.solver_time
-    nodes, informative_nodes = _count_nodes(observation_tree.root)
 
     if return_data:
         info = {
@@ -61,8 +47,8 @@ def run_lsharp_square(alphabet: list, words: list[tuple[tuple[Any, ...], bool]],
             "learning_time": total_time - solver_time,
             "solver_time": solver_time,
             "total_time": total_time,
-            "nodes": nodes,
-            "informative_nodes": informative_nodes,
+            "nodes": observation_tree.number_of_nodes,
+            "informative_nodes": observation_tree.number_of_informative_nodes,
         }
         return dfa, info
 

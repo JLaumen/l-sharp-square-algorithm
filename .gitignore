@@ -209,3 +209,6 @@ __marimo__/
 # Benchmark results and plots
 benchmarking/results/
 benchmarking/plots/
+
+# C++ build of the passive learner
+cpp/lsharp_square

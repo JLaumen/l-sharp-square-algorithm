@@ -92,6 +92,22 @@ Using `-j` can significantly reduce the total runtime of the full benchmark, but
 
 ---
 
+## C++ Implementation
+
+`cpp/lsharp_square.cpp` is a port of the passive learner (`ObservationTreeSquare.py` and `DfaEncoding.py`) that
+builds the same CNF and links [CaDiCaL](https://github.com/arminbiere/cadical) in-process. Build CaDiCaL
+(`./configure && make` in its source tree), then:
+
+```bash
+make -C cpp CADICAL=/path/to/cadical
+cpp/lsharp_square benchmarking/benchmarks/dfaminer/res10-1.txt --dfa
+```
+
+It reads a sample in Abbadingo format and prints `file,states,agrees,solver_time,total_time`; with `--dfa` it then
+prints one line per state: whether it is accepting, followed by its target per input letter (state 0 is initial).
+
+---
+
 # RERS BENCHMARKS
 
 ## Setup
