@@ -4,7 +4,8 @@
 // Usage: lsharp_square FILE [--dfa]
 //
 // FILE is a sample in Abbadingo format; lines with labels other than 0 and 1 are skipped. Prints
-// "file,states,agrees,solver_time,total_time" and, with --dfa, then one line per state:
+// "file,states,agrees,solve_time,total_time", where solve_time is the time spent
+// in CaDiCaL's solve calls, and, with --dfa, then one line per state:
 // "accepting target_0 target_1 ..." (state 0 is initial).
 #include <chrono>
 #include <cstdio>
@@ -281,7 +282,7 @@ private:
 
 class Learner {
 public:
-    double solver_time = 0;
+    double solve_time = 0;  // Time spent in CaDiCaL's solve calls.
 
     explicit Learner(const ObservationTree& tree) : tree_(tree) {}
 
@@ -310,7 +311,6 @@ private:
 
     // A DFA with the fewest states in lower..cap, if there is one.
     std::optional<Hypothesis> find_hypothesis(int lower, int cap) {
-        auto start = Clock::now();
         int basis_size = static_cast<int>(basis_.size());
         std::vector<std::vector<int>> domains(tree_.size());
         for (int state = 0; state < basis_size; ++state)
@@ -328,11 +328,12 @@ private:
         std::optional<Hypothesis> hypothesis;
         for (int bound = lower; bound <= cap && !hypothesis; ++bound) {
             if (int assumption = encoding.bound_assumption(bound)) solver.assume(assumption);
+            auto start = Clock::now();
             int result = solver.solve();
+            solve_time += seconds_since(start);
             if (result != 10 && result != 20) throw std::runtime_error("SAT solver failed");
             if (result == 10) hypothesis = encoding.decode(bound);
         }
-        solver_time += seconds_since(start);
         return hypothesis;
     }
 };
@@ -380,7 +381,7 @@ int main(int argc, char** argv) {
         std::string name = argv[1];
         name = name.substr(name.find_last_of('/') + 1);
         std::printf("%s,%zu,%s,%.4f,%.4f\n", name.c_str(), dfa.accepting.size(), agrees ? "True" : "False",
-                    learner.solver_time, seconds_since(start));
+                    learner.solve_time, seconds_since(start));
         if (argc == 3)
             for (size_t state = 0; state < dfa.accepting.size(); ++state) {
                 std::printf("%d", static_cast<int>(dfa.accepting[state]));

@@ -103,7 +103,8 @@ make -C cpp CADICAL=/path/to/cadical
 cpp/lsharp_square benchmarking/benchmarks/dfaminer/res10-1.txt --dfa
 ```
 
-It reads a sample in Abbadingo format and prints `file,states,agrees,solver_time,total_time`; with `--dfa` it then
+It reads a sample in Abbadingo format and prints `file,states,agrees,solve_time,total_time`,
+where `solve_time` is the time spent in CaDiCaL's solve calls; with `--dfa` it then
 prints one line per state: whether it is accepting, followed by its target per input letter (state 0 is initial).
 
 ---
